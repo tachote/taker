@@ -41,16 +41,34 @@ type HTTPCmd struct {
 }
 
 var cli struct {
-	Snap SnapCmd `cmd:"" default:"withargs" help:"Render a code file as a PNG screenshot."`
-	HTTP HTTPCmd `cmd:"http" help:"Render HTTP request/response evidence (side-by-side)."`
+	Snap    SnapCmd `cmd:"" default:"withargs" help:"Render a code file as a PNG screenshot."`
+	HTTP    HTTPCmd `cmd:"http" help:"Render HTTP request/response evidence (side-by-side)."`
+	Version bool    `short:"v" name:"version" help:"Print version and exit."`
 }
 
+// version is set by GoReleaser via -ldflags "-X main.version=..."
+var version = "dev"
+
 func main() {
+	// Show help when called with no arguments and stdin is a terminal.
+	if len(os.Args) == 1 {
+		fi, err := os.Stdin.Stat()
+		if err != nil || (fi.Mode()&os.ModeCharDevice) != 0 {
+			fmt.Fprintln(os.Stderr, "taker: no input. Run 'taker --help' for usage.")
+			os.Exit(1)
+		}
+	}
+
 	ctx := kong.Parse(&cli,
 		kong.Name("taker"),
 		kong.Description("Generate professional code & HTTP evidence screenshots for security audits."),
 		kong.UsageOnError(),
 	)
+
+	if cli.Version {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	switch ctx.Command() {
 	case "http":
