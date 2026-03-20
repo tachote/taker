@@ -104,6 +104,30 @@ cat vuln.js | taker -l javascript -t "vuln.js" -H 8 -o evidence.png
 taker secrets.py -H 15 -T dracula -o evidence.png
 ```
 
+**Highlight + context (VS Code Dark+):**
+
+```bash
+taker render/render.go -H 279-283 -c 4 -o evidence.png
+```
+
+![Highlight with context](assets/example-highlight-context.png)
+
+**Dracula theme, non-contiguous highlights:**
+
+```bash
+taker main.go -H 56,59 -c 3 -T dracula -o evidence.png
+```
+
+![Dracula theme](assets/example-dracula.png)
+
+**Catppuccin Mocha, line selection:**
+
+```bash
+taker render/theme.go -n "1-30" -H 17-22 -T catppuccin-mocha -o evidence.png
+```
+
+![Catppuccin Mocha](assets/example-catppuccin.png)
+
 ### HTTP evidence
 
 ```
@@ -134,6 +158,14 @@ taker http -r request.http -s response.http --hr "8" --hs "15" -o evidence.png
 # Wider panels for responses with long headers
 taker http -r req.http -s res.http --wrap-width 110 -o evidence.png
 ```
+
+**Credential leak — highlighted request line 8, response line 6 (Dracula):**
+
+```bash
+taker http -r request.http -s response.http --hr 8 --hs 6 -T dracula -o evidence.png
+```
+
+![HTTP evidence](assets/example-http.png)
 
 **Request file format** (`request.http`):
 ```

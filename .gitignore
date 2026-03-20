@@ -1,3 +1,4 @@
 taker
 dist/
 *.png
+!assets/*.png
