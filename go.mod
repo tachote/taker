@@ -1,4 +1,4 @@
-module github.com/cvargas/taker
+module github.com/tachote/taker
 
 go 1.22
 

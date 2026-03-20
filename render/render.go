@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"unicode/utf8"
 
-	customfont "github.com/cvargas/taker/font"
-	"github.com/cvargas/taker/highlight"
+	customfont "github.com/tachote/taker/font"
+	"github.com/tachote/taker/highlight"
 	"golang.org/x/image/font"
 	"golang.org/x/image/math/fixed"
 )

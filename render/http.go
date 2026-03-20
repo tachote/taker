@@ -5,7 +5,7 @@ import (
 	"image"
 	"image/draw"
 
-	"github.com/cvargas/taker/highlight"
+	"github.com/tachote/taker/highlight"
 )
 
 const (

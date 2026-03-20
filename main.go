@@ -10,8 +10,8 @@ import (
 	"strings"
 
 	"github.com/alecthomas/kong"
-	"github.com/cvargas/taker/highlight"
-	"github.com/cvargas/taker/render"
+	"github.com/tachote/taker/highlight"
+	"github.com/tachote/taker/render"
 )
 
 // SnapCmd renders a single code file.

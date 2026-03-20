@@ -10,26 +10,26 @@ Produces VS Code Dark+-styled PNG images with syntax highlighting, line numbers,
 
 ### Download binary (recommended)
 
-Download the latest release for your platform from the [releases page](https://github.com/cvargas/taker/releases):
+Download the latest release for your platform from the [releases page](https://github.com/tachote/taker/releases):
 
 ```bash
 # macOS (Apple Silicon)
-curl -L https://github.com/cvargas/taker/releases/latest/download/taker_Darwin_arm64.tar.gz | tar xz
+curl -L https://github.com/tachote/taker/releases/latest/download/taker_Darwin_arm64.tar.gz | tar xz
 sudo mv taker /usr/local/bin/
 
 # macOS (Intel)
-curl -L https://github.com/cvargas/taker/releases/latest/download/taker_Darwin_x86_64.tar.gz | tar xz
+curl -L https://github.com/tachote/taker/releases/latest/download/taker_Darwin_x86_64.tar.gz | tar xz
 sudo mv taker /usr/local/bin/
 
 # Linux (amd64)
-curl -L https://github.com/cvargas/taker/releases/latest/download/taker_Linux_x86_64.tar.gz | tar xz
+curl -L https://github.com/tachote/taker/releases/latest/download/taker_Linux_x86_64.tar.gz | tar xz
 sudo mv taker /usr/local/bin/
 ```
 
 ### go install
 
 ```bash
-go install github.com/cvargas/taker@latest
+go install github.com/tachote/taker@latest
 ```
 
 Requires Go 1.22+.
@@ -37,7 +37,7 @@ Requires Go 1.22+.
 ### Build from source
 
 ```bash
-git clone https://github.com/cvargas/taker
+git clone https://github.com/tachote/taker
 cd taker
 go build -o taker .
 ```
