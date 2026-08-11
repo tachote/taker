@@ -46,13 +46,15 @@ go build -o taker .
 
 ## Features
 
-- **VS Code Dark+ aesthetics** — tab bar, gutter, syntax highlighting, file type icons (Nerd Fonts)
+- **VS Code Dark+ aesthetics** — window chrome with rounded corners, tab bar, gutter, syntax highlighting
+- **Brand-colored file icons** — 260+ extensions and filenames (`Dockerfile`, `go.mod`, `.env`, `pom.xml`), each a real Nerd Fonts logo in its language color
 - **10 built-in themes** — VS Code Dark+, Dracula, Nord, Catppuccin Mocha, GitHub Dark, Gruvbox, One Dark, Monokai, Solarized Dark, Rosé Pine
-- **Line selection** — render only the lines you need (`1,5,10-20,30-40`), with automatic gap indicators (`⋮`) between non-adjacent ranges
+- **Line selection** — render only the lines you need (`1,5,10-20,30-40`), with gap bands stating how many lines were skipped
 - **Context mode** — automatically include N lines around highlighted lines (`--context 5`)
-- **Highlight overlay** — red background + border on arbitrary lines or ranges (`13,15` or `10-20`)
-- **Word wrap** — wrap long lines with continuation indicators, like VS Code
-- **HTTP evidence mode** — side-by-side Request / Response panels for documenting HTTP vulnerabilities
+- **Point at the finding, not the line** — mark a column range (`-H "7:63-85"`) or, better, paste the value itself (`-m "sk_live_4xT9mK2pQrN8vW1"`) and let `taker` locate every occurrence
+- **Captions** — `-L` adds a strip stating what the image proves, drawn outside the window so it never reads as something the tool under test printed
+- **Word wrap** — wrap long lines with continuation indicators; wraps automatically rather than cropping
+- **HTTP evidence mode** — side-by-side Request / Response pane that mimics Burp Suite's message editor, so evidence reads like a Burp screenshot
 - **Stdin support** — pipe code directly without creating a temp file
 - **Self-contained binary** — JetBrains Mono and Symbols Nerd Font are embedded; no runtime dependencies
 
@@ -70,11 +72,13 @@ taker [file] [flags]
 |------|-------|---------|-------------|
 | `--lang` | `-l` | auto | Language for syntax highlighting |
 | `--lines` | `-n` | all | Lines to include, e.g. `1,5,10-20` |
-| `--highlight` | `-H` | — | Lines to highlight in red, e.g. `15` or `13,15` or `10-20` |
+| `--highlight` | `-H` | — | Regions to highlight in red: `15`, `13,15`, `10-20`, or `15:20-45` for columns |
+| `--mark` | `-m` | — | Highlight every occurrence of this text. Repeatable |
+| `--label` | `-L` | — | Caption stating what the image proves |
 | `--context` | `-c` | 0 | Include N context lines around each highlighted line |
-| `--wrap` | `-w` | false | Wrap long lines (VS Code-style word wrap) |
-| `--wrap-width` | | 100 | Column width when wrapping |
-| `--title` | `-t` | filename | Title shown in the tab bar |
+| `--wrap` | `-w` | false | Wrap long lines at a column boundary |
+| `--wrap-width` | | 100 | Column width when wrapping (implies `--wrap`; floor 20) |
+| `--title` | `-t` | file path | Title shown in the tab bar |
 | `--theme` | `-T` | `vscode-dark` | Color theme |
 | `--output` | `-o` | `output.png` | Output PNG path |
 | `--list-themes` | | | Print available themes and exit |
@@ -87,6 +91,16 @@ taker auth.go -o evidence.png
 
 # Highlight a specific vulnerability (line 42)
 taker auth.py -H 42 -o evidence.png
+
+# Box the secret itself — no column counting
+taker auth.py -m "sk_live_4xT9mK2pQrN8vW1" -o evidence.png
+
+# Or give the columns explicitly
+taker auth.py -H "42:18-41" -o evidence.png
+
+# Caption it so the image explains itself in the report
+taker auth.py -m "sk_live_4xT9mK2pQrN8vW1" \
+  -L "SOLTAU-005 · client secret hardcoded in the mobile build" -o evidence.png
 
 # Highlight with 5 lines of context — ideal for SAST/AI agents
 taker auth.py -H 42 -c 5 -o evidence.png
@@ -107,23 +121,23 @@ taker secrets.py -H 15 -T dracula -o evidence.png
 **Highlight + context (VS Code Dark+):**
 
 ```bash
-taker render/render.go -H 279-283 -c 4 -o evidence.png
+taker render/render.go -m "maxImageHeight" -c 4 -o evidence.png
 ```
 
 ![Highlight with context](assets/example-highlight-context.png)
 
-**Dracula theme, non-contiguous highlights:**
+**Dracula theme, two marks found by content:**
 
 ```bash
-taker main.go -H 56,59 -c 3 -T dracula -o evidence.png
+taker main.go -m "io.ReadAll" -m "filepath.IsAbs" -c 3 -T dracula -o evidence.png
 ```
 
 ![Dracula theme](assets/example-dracula.png)
 
-**Catppuccin Mocha, line selection:**
+**Catppuccin Mocha, line selection plus a content mark:**
 
 ```bash
-taker render/theme.go -n "1-30" -H 17-22 -T catppuccin-mocha -o evidence.png
+taker render/theme.go -n "1-32" -m "ChromeBg" -T catppuccin-mocha -o evidence.png
 ```
 
 ![Catppuccin Mocha](assets/example-catppuccin.png)
@@ -134,17 +148,25 @@ taker render/theme.go -n "1-30" -H 17-22 -T catppuccin-mocha -o evidence.png
 taker http -r <request-file> -s <response-file> [flags]
 ```
 
-Renders a side-by-side Request / Response panel image, similar to Burp Suite's repeater view.
+Renders a side-by-side Request / Response pane built to look like Burp Suite's message editor: title strip, `Pretty | Raw | Hex` view tabs with the active one underlined, dense line spacing, a gutter with no rule, and wrapped rows left unnumbered the way Burp does it. Headers are near-monochrome with only the JSON body colored, matching Burp's Pretty view.
 
 | Flag | Description |
 |------|-------------|
 | `-r` | File containing the raw HTTP request |
 | `-s` | File containing the raw HTTP response |
-| `--hr` | Lines to highlight in the request panel |
-| `--hs` | Lines to highlight in the response panel |
+| `--hr` | Regions to highlight in the request: `8-9`, or `8:20-45` for columns |
+| `--hs` | Regions to highlight in the response: `4`, or `4:12-60` for columns |
+| `--mark` / `-m` | Highlight every occurrence of this text in either panel. Repeatable |
+| `--label` / `-L` | Caption stating what the image proves |
+| `--nr` | Lines to include from the request, e.g. `1-20` |
+| `--ns` | Lines to include from the response, e.g. `1-30` |
+| `-c` | Include N context lines around each highlighted line |
 | `--wrap-width` | Columns per panel (default: 90) |
-| `-T` | Color theme |
 | `-o` | Output PNG path |
+
+There is no `-T` here. HTTP evidence always renders in the Burp palette: a reader recognises a proxy capture at a glance, and a Dracula-tinted pane labelled *Request / Response / Pretty / Raw / Hex* is a screenshot of an application that does not exist.
+
+`-c` only applies to a panel that has highlights, so a response-only finding still renders its request in full.
 
 #### Examples
 
@@ -153,16 +175,28 @@ Renders a side-by-side Request / Response panel image, similar to Burp Suite's r
 taker http -r request.http -s response.http -o evidence.png
 
 # Highlight the credential leak line in request and the token in response
-taker http -r request.http -s response.http --hr "8" --hs "15" -o evidence.png
+taker http -r request.http -s response.http --hr "7" --hs "7" -o evidence.png
 
 # Wider panels for responses with long headers
 taker http -r req.http -s res.http --wrap-width 110 -o evidence.png
+
+# A long body: show 6 lines around the finding instead of all 3000
+taker http -r req.http -s res.http --hs 1520 -c 6 -o evidence.png
+
+# Response headers only
+taker http -r req.http -s res.http --ns 1-30 -o evidence.png
+
+# Box a value wherever it appears, in either panel, and caption the finding
+taker http -r req.http -s res.http \
+  -m "sk_live_4xT9mK2pQrN8vW1" -m "read:users write:admin" \
+  -L "SOLTAU-005 · client_secret in the body; returned token grants write:admin" \
+  -o evidence.png
 ```
 
-**Credential leak — highlighted request line 8, response line 6 (Dracula):**
+**Credential leak — highlighted request line 7, response line 7:**
 
 ```bash
-taker http -r request.http -s response.http --hr 8 --hs 6 -T dracula -o evidence.png
+taker http -r request.http -s response.http --hr 7 --hs 7 -o evidence.png
 ```
 
 ![HTTP evidence](assets/example-http.png)
@@ -195,6 +229,7 @@ taker --list-themes
 | Key | Name |
 |-----|------|
 | `vscode-dark` *(default)* | VS Code Dark+ |
+| `burp` | Burp Suite (dark) — always used by `taker http`, and available to `taker` |
 | `dracula` | Dracula |
 | `nord` | Nord |
 | `catppuccin-mocha` | Catppuccin Mocha |
@@ -204,6 +239,19 @@ taker --list-themes
 | `monokai` | Monokai |
 | `solarized-dark` | Solarized Dark |
 | `rose-pine` | Rosé Pine |
+
+---
+
+## Behavior
+
+Guards against shipping a screenshot that proves nothing:
+
+- **No matching lines** → error, exit 1. `-n 500-600` on a 100-line file will not emit a blank PNG. Same for `--nr` / `--ns`, and for an empty request or response file.
+- **Body too long to look at** → a 3000-line response renders 129 000px tall, past the 32 767px browsers decode. `taker` refuses before allocating (which would cost about a gigabyte) and names the fix; past 8 000px it warns but still renders, because that call is yours.
+- **Nothing highlighted** → warning on stderr. The image is still written, but you are told the `-H` / `--hr` / `--hs` lines are not in the output.
+- **`-m` matched nothing** → warning naming the literal. Shipping a screenshot whose marker silently missed is the failure this tool exists to prevent.
+- **Content too wide** → wraps automatically at the widest column that fits and says so, instead of cropping the line. Use `--wrap-width` to pick the width yourself.
+- **Skipped lines** → the gap band states the count (`··· 37 lines skipped`), so a reader can tell how much was left out.
 
 ---
 

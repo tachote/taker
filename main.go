@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,28 +18,34 @@ import (
 
 // SnapCmd renders a single code file.
 type SnapCmd struct {
-	File       string `arg:"" optional:"" help:"Source file to render (reads stdin if omitted)."`
-	Lang       string `short:"l" help:"Language for syntax highlighting (auto-detected if omitted)."`
-	Lines      string `short:"n" help:"Lines to include, e.g. '1,5,10-20'. Ignored when --context is set."`
-	Highlight  string `short:"H" help:"Lines to highlight, e.g. '15' or '13,15' or '10-20'."`
-	Context    int    `short:"c" default:"0" help:"Include N context lines around each highlighted line (requires --highlight)."`
-	Wrap       bool   `short:"w" help:"Wrap long lines (like VS Code word wrap)."`
-	WrapWidth  int    `name:"wrap-width" default:"0" help:"Column width for wrapping (default: 100)."`
-	Output     string `short:"o" default:"output.png" help:"Output PNG file path."`
-	Title      string `short:"t" help:"Title shown in the tab bar (defaults to file basename)."`
-	Theme      string `short:"T" default:"vscode-dark" help:"Color theme. Use --list-themes to see options."`
-	ListThemes bool   `name:"list-themes" help:"Print available themes and exit."`
+	File       string   `arg:"" optional:"" help:"Source file to render (reads stdin if omitted)."`
+	Lang       string   `short:"l" help:"Language for syntax highlighting (auto-detected if omitted)."`
+	Lines      string   `short:"n" help:"Lines to include, e.g. '1,5,10-20'. Ignored when --context is set."`
+	Highlight  string   `short:"H" help:"Regions to highlight: '15', '13,15', '10-20', or '15:20-45' for columns."`
+	Mark       []string `short:"m" help:"Highlight every occurrence of this text. Repeatable."`
+	Label      string   `short:"L" help:"Caption strip stating what the image proves."`
+	Context    int      `short:"c" default:"0" help:"Include N context lines around each highlighted line (requires --highlight)."`
+	Wrap       bool     `short:"w" help:"Wrap long lines at a column boundary."`
+	WrapWidth  int      `name:"wrap-width" default:"0" help:"Columns per row (default: 100, minimum 20). Implies --wrap."`
+	Output     string   `short:"o" default:"output.png" help:"Output PNG file path."`
+	Title      string   `short:"t" help:"Title shown in the tab bar (defaults to file basename)."`
+	Theme      string   `short:"T" default:"vscode-dark" help:"Color theme. Use --list-themes to see options."`
+	ListThemes bool     `name:"list-themes" help:"Print available themes and exit."`
 }
 
 // HTTPCmd renders a side-by-side HTTP request/response evidence image.
 type HTTPCmd struct {
-	Request   string `short:"r" required:"" help:"File containing the HTTP request."`
-	Response  string `short:"s" required:"" help:"File containing the HTTP response."`
-	ReqHL     string `name:"hr" help:"Lines to highlight in request, e.g. '8-9'."`
-	ResHL     string `name:"hs" help:"Lines to highlight in response, e.g. '4'."`
-	WrapWidth int    `name:"wrap-width" default:"0" help:"Columns per panel (default: 90)."`
-	Output    string `short:"o" default:"output.png" help:"Output PNG file path."`
-	Theme     string `short:"T" default:"vscode-dark" help:"Color theme."`
+	Request   string   `short:"r" required:"" help:"File containing the HTTP request."`
+	Response  string   `short:"s" required:"" help:"File containing the HTTP response."`
+	ReqHL     string   `name:"hr" help:"Regions to highlight in request: '8-9' or '8:20-45' for columns."`
+	ResHL     string   `name:"hs" help:"Regions to highlight in response: '4' or '4:12-60' for columns."`
+	Mark      []string `short:"m" help:"Highlight every occurrence of this text in either panel. Repeatable."`
+	Label     string   `short:"L" help:"Caption strip stating what the image proves."`
+	ReqLines  string   `name:"nr" help:"Lines to include from the request, e.g. '1-20'."`
+	ResLines  string   `name:"ns" help:"Lines to include from the response, e.g. '1-30'."`
+	Context   int      `short:"c" default:"0" help:"Include N context lines around each highlighted line; applies per panel."`
+	WrapWidth int      `name:"wrap-width" default:"0" help:"Columns per panel (default: 90, minimum 20)."`
+	Output    string   `short:"o" default:"output.png" help:"Output PNG file path."`
 }
 
 var cli struct {
@@ -87,23 +95,34 @@ func runSnap(cmd *SnapCmd) {
 		sort.Strings(names)
 		fmt.Println("Available themes:")
 		for _, name := range names {
-			marker := "  "
-			if name == "vscode-dark" {
-				marker = "* "
+			note := ""
+			switch name {
+			case "vscode-dark":
+				note = "  (default)"
+			case "burp":
+				note = "  (always used by `taker http`)"
 			}
-			fmt.Printf("  %s%-20s  %s\n", marker, name, render.Themes[name].Name)
+			fmt.Printf("    %-20s  %s%s\n", name, render.Themes[name].Name, note)
 		}
 		os.Exit(0)
 	}
 
 	theme := resolveTheme(cmd.Theme)
 
+	// Asking for a column width and not getting wrapping is never what anyone
+	// meant, and the flag used to be silently ignored without --wrap.
+	cmd.WrapWidth = clampWrapWidth(cmd.WrapWidth, false)
+	if cmd.WrapWidth > 0 {
+		cmd.Wrap = true
+	}
+
 	var src []byte
 	var err error
 	if cmd.File != "" {
 		src, err = os.ReadFile(cmd.File)
 	} else {
-		src, err = os.ReadFile("/dev/stdin")
+		// Not /dev/stdin: that path does not exist on Windows.
+		src, err = io.ReadAll(os.Stdin)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "taker: read input: %v\n", err)
@@ -112,7 +131,13 @@ func runSnap(cmd *SnapCmd) {
 
 	title := cmd.Title
 	if title == "" && cmd.File != "" {
-		title = filepath.Base(cmd.File)
+		// Keep the relative path — in evidence, auth/views.py beats views.py.
+		// Absolute paths leak the analyst's filesystem, so trim those.
+		if filepath.IsAbs(cmd.File) {
+			title = filepath.Base(cmd.File)
+		} else {
+			title = filepath.ToSlash(filepath.Clean(cmd.File))
+		}
 	}
 	if title == "" {
 		title = "code"
@@ -130,35 +155,22 @@ func runSnap(cmd *SnapCmd) {
 		os.Exit(1)
 	}
 
-	var lineSpec []int
-	if cmd.Context > 0 {
-		if len(hlLines) == 0 {
-			fmt.Fprintf(os.Stderr, "taker: --context requires --highlight\n")
-			os.Exit(1)
-		}
-		if cmd.Lines != "" {
-			fmt.Fprintf(os.Stderr, "taker: --context overrides --lines; ignoring -n\n")
-		}
-		var nums []int
-		for lineNum := range hlLines {
-			start := lineNum - cmd.Context
-			if start < 1 {
-				start = 1
-			}
-			for i := start; i <= lineNum+cmd.Context; i++ {
-				nums = append(nums, i)
-			}
-		}
-		lineSpec = highlight.BuildLineSpec(nums)
-	} else {
-		lineSpec, err = highlight.ParseLineSpec(cmd.Lines)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "taker: parse lines: %v\n", err)
-			os.Exit(1)
-		}
+	// Merge before the guard: -m supplies marks just as -H does, and --context
+	// centers on either.
+	hlLines = hlLines.Merge(findMarks(all, cmd.Mark))
+	if cmd.Context > 0 && len(hlLines) == 0 {
+		fmt.Fprintf(os.Stderr, "taker: --context needs --highlight or --mark to center on\n")
+		os.Exit(1)
 	}
 
+	lineSpec := resolveLineSpec("--lines", cmd.Lines, hlLines, cmd.Context)
 	lines := highlight.FilterLines(all, lineSpec)
+	// A spec that matches nothing would emit a blank PNG at exit 0 — exactly the
+	// kind of thing that reaches a report unnoticed.
+	if len(lines) == 0 {
+		fmt.Fprintf(os.Stderr, "taker: no lines matched (file has %d lines)\n", len(all))
+		os.Exit(1)
+	}
 
 	img, err := render.Render(&render.Config{
 		Lines:          lines,
@@ -167,6 +179,7 @@ func runSnap(cmd *SnapCmd) {
 		Theme:          theme,
 		Wrap:           cmd.Wrap,
 		WrapWidth:      cmd.WrapWidth,
+		Caption:        cmd.Label,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "taker: render: %v\n", err)
@@ -177,7 +190,7 @@ func runSnap(cmd *SnapCmd) {
 }
 
 func runHTTP(cmd *HTTPCmd) {
-	theme := resolveTheme(cmd.Theme)
+	cmd.WrapWidth = clampWrapWidth(cmd.WrapWidth, true)
 
 	reqSrc, err := os.ReadFile(cmd.Request)
 	if err != nil {
@@ -187,6 +200,15 @@ func runHTTP(cmd *HTTPCmd) {
 	resSrc, err := os.ReadFile(cmd.Response)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "taker: read response: %v\n", err)
+		os.Exit(1)
+	}
+	// An empty capture is a mistake upstream, not evidence of anything.
+	if len(bytes.TrimSpace(reqSrc)) == 0 {
+		fmt.Fprintf(os.Stderr, "taker: %s is empty\n", cmd.Request)
+		os.Exit(1)
+	}
+	if len(bytes.TrimSpace(resSrc)) == 0 {
+		fmt.Fprintf(os.Stderr, "taker: %s is empty\n", cmd.Response)
 		os.Exit(1)
 	}
 
@@ -201,13 +223,31 @@ func runHTTP(cmd *HTTPCmd) {
 		os.Exit(1)
 	}
 
+	// --mark's matches are found while rendering, so they count here too.
+	if cmd.Context > 0 && len(reqHL) == 0 && len(resHL) == 0 && len(cmd.Mark) == 0 {
+		fmt.Fprintf(os.Stderr, "taker: --context needs --hr, --hs or --mark to center on\n")
+		os.Exit(1)
+	}
+	if cmd.Context > 0 {
+		if cmd.ReqLines != "" {
+			fmt.Fprintf(os.Stderr, "taker: --context overrides --nr; ignoring it\n")
+		}
+		if cmd.ResLines != "" {
+			fmt.Fprintf(os.Stderr, "taker: --context overrides --ns; ignoring it\n")
+		}
+	}
+
 	img, err := render.RenderHTTP(&render.HTTPConfig{
-		Request:    string(reqSrc),
-		Response:   string(resSrc),
-		RequestHL:  reqHL,
-		ResponseHL: resHL,
-		Theme:      theme,
-		WrapWidth:  cmd.WrapWidth,
+		Request:       string(reqSrc),
+		Response:      string(resSrc),
+		RequestHL:     reqHL,
+		ResponseHL:    resHL,
+		Mark:          cmd.Mark,
+		RequestLines:  parseLineSpec("--nr", cmd.ReqLines),
+		ResponseLines: parseLineSpec("--ns", cmd.ResLines),
+		Context:       cmd.Context,
+		WrapWidth:     cmd.WrapWidth,
+		Caption:       cmd.Label,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "taker: render: %v\n", err)
@@ -215,6 +255,69 @@ func runHTTP(cmd *HTTPCmd) {
 	}
 
 	writePNG(img, cmd.Output)
+}
+
+// resolveLineSpec picks which lines to render: --context expands around each
+// highlighted line, otherwise the explicit spec (empty = every line). Shared by
+// both commands so `taker http` trims the same way `taker` does.
+//
+// Context only applies to a panel that has highlights to center on. In HTTP mode
+// one side often carries none — the request in a response-only finding — and
+// that side must still render, not abort the run.
+func resolveLineSpec(flag, spec string, hl highlight.Marks, context int) []int {
+	if s := highlight.ContextSpec(hl, context); s != nil {
+		if spec != "" {
+			fmt.Fprintf(os.Stderr, "taker: --context overrides %s; ignoring it\n", flag)
+		}
+		return s
+	}
+	return parseLineSpec(flag, spec)
+}
+
+// parseLineSpec exits with the flag named, so an error points at what to edit.
+func parseLineSpec(flag, spec string) []int {
+	parsed, err := highlight.ParseLineSpec(spec)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "taker: parse %s: %v\n", flag, err)
+		os.Exit(1)
+	}
+	return parsed
+}
+
+// findMarks locates every literal the analyst passed with --mark. Anything that
+// matches nothing is reported: a silently unmarked screenshot is the failure
+// mode this whole tool exists to avoid.
+func findMarks(lines []highlight.LineTokens, needles []string) highlight.Marks {
+	var out highlight.Marks
+	for _, needle := range needles {
+		found := highlight.FindLiteral(lines, needle)
+		if found == nil {
+			fmt.Fprintf(os.Stderr, "taker: warning: --mark %q matched nothing\n", needle)
+			continue
+		}
+		out = out.Merge(found)
+	}
+	return out
+}
+
+// clampWrapWidth reports a too-narrow width once, at the flag level. Render
+// clamps silently too, but doing it here keeps a two-panel HTTP run from
+// printing the same complaint for each panel.
+func clampWrapWidth(w int, httpMode bool) int {
+	const minCols = 20
+	if w <= 0 {
+		return w
+	}
+	if w < minCols {
+		fmt.Fprintf(os.Stderr, "taker: --wrap-width %d is below the %d-column minimum; using %d\n",
+			w, minCols, minCols)
+		return minCols
+	}
+	if max := render.MaxWrapCols(httpMode); w > max {
+		fmt.Fprintf(os.Stderr, "taker: --wrap-width %d is wider than the canvas; wrapping at %d columns\n", w, max)
+		return max
+	}
+	return w
 }
 
 func resolveTheme(name string) *render.Theme {
@@ -226,15 +329,35 @@ func resolveTheme(name string) *render.Theme {
 	return theme
 }
 
+// writePNG encodes to a temporary file and renames it into place.
+//
+// Writing straight to path would truncate whatever is already there before
+// encoding, and os.Exit skips deferred closes — so a failure part-way left a
+// corrupt PNG where a good piece of evidence used to be.
 func writePNG(img image.Image, path string) {
-	out, err := os.Create(path)
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".taker-*.png")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "taker: create output: %v\n", err)
 		os.Exit(1)
 	}
-	defer out.Close()
-	if err := png.Encode(out, img); err != nil {
-		fmt.Fprintf(os.Stderr, "taker: encode png: %v\n", err)
+	tmpName := tmp.Name()
+
+	fail := func(format string, args ...any) {
+		tmp.Close()
+		os.Remove(tmpName)
+		fmt.Fprintf(os.Stderr, "taker: "+format+"\n", args...)
+		os.Exit(1)
+	}
+	if err := png.Encode(tmp, img); err != nil {
+		fail("encode png: %v", err)
+	}
+	if err := tmp.Close(); err != nil {
+		fail("write output: %v", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		fmt.Fprintf(os.Stderr, "taker: save output: %v\n", err)
 		os.Exit(1)
 	}
 	fmt.Printf("taker: wrote %s\n", path)
