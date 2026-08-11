@@ -2,7 +2,6 @@ package highlight
 
 import (
 	"strings"
-	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -11,15 +10,15 @@ import (
 
 // Token is a single syntax-highlighted token with resolved RGB color.
 type Token struct {
-	Text         string
-	R, G, B      uint8
-	Bold, Italic bool
+	Text    string
+	R, G, B uint8
 }
 
 // LineTokens represents one display line.
 type LineTokens struct {
 	LineNum int
 	IsGap   bool
+	Skipped int // for gap rows: how many lines were omitted
 	Tokens  []Token
 }
 
@@ -76,21 +75,77 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 				current = LineTokens{LineNum: current.LineNum + 1}
 			}
 			if part != "" {
-				current.Tokens = append(current.Tokens, Token{
-					Text:   part,
-					R:      r,
-					G:      g,
-					B:      b,
-					Bold:   entry.Bold == chroma.Yes,
-					Italic: entry.Italic == chroma.Yes,
-				})
+				current.Tokens = append(current.Tokens, Token{Text: part, R: r, G: g, B: b})
 			}
 		}
 	}
 	// Flush last line
 	lines = append(lines, current)
 
+	// A trailing "\n" closes the last line; it does not open a new one. Without
+	// this, every file that ends in a newline renders one phantom blank line.
+	if len(lines) > 1 && len(lines[len(lines)-1].Tokens) == 0 {
+		lines = lines[:len(lines)-1]
+	}
+
 	return lines, nil
+}
+
+// Text is the plain text of the line, with tabs already expanded, so column
+// numbers taken from it line up with what gets drawn.
+func (lt LineTokens) Text() string {
+	var b strings.Builder
+	for _, tok := range lt.Tokens {
+		b.WriteString(tok.Text)
+	}
+	return b.String()
+}
+
+// FindLiteral marks every occurrence of needle across the given lines.
+//
+// This is the difference between usable and not: counting columns to write
+// "7:63-85" is error-prone, whereas pasting the secret you just found is the
+// thing an analyst already has in the clipboard.
+func FindLiteral(lines []LineTokens, needle string) Marks {
+	if needle == "" {
+		return nil
+	}
+	want := []rune(needle)
+	found := Marks{}
+	for _, lt := range lines {
+		if lt.IsGap {
+			continue
+		}
+		text := []rune(lt.Text())
+		for i := 0; i+len(want) <= len(text); i++ {
+			if string(text[i:i+len(want)]) != needle {
+				continue
+			}
+			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: i + 1, End: i + len(want)})
+			i += len(want) - 1
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return found
+}
+
+// Merge returns the union of m and other. Neither input is modified: RenderHTTP
+// merges literal matches into the caller's highlight map, and a render must not
+// leave the config it was handed different from how it found it.
+func (m Marks) Merge(other Marks) Marks {
+	if len(other) == 0 {
+		return m
+	}
+	out := make(Marks, len(m)+len(other))
+	for line, spans := range m {
+		out[line] = append([]Span(nil), spans...)
+	}
+	for line, spans := range other {
+		out[line] = append(out[line], spans...)
+	}
+	return out
 }
 
 // FilterLines applies a LineSpec (with gap sentinels) to the full tokenized lines.
@@ -106,35 +161,29 @@ func FilterLines(all []LineTokens, spec []int) []LineTokens {
 		byNum[lt.LineNum] = lt
 	}
 
-	var result []LineTokens
+	// Keep only lines that exist, then derive the gaps from those. Deriving from
+	// the spec's sentinels instead would emit gaps for out-of-range requests —
+	// a trailing "896 lines skipped" on a 115-line file, with nothing after it.
+	var found []LineTokens
 	for _, n := range spec {
 		if n == GapSentinel {
-			result = append(result, LineTokens{IsGap: true})
 			continue
 		}
 		if lt, ok := byNum[n]; ok {
-			result = append(result, lt)
+			found = append(found, lt)
 		}
+	}
+
+	var result []LineTokens
+	for i, lt := range found {
+		if i > 0 {
+			if skipped := lt.LineNum - found[i-1].LineNum - 1; skipped > 0 {
+				result = append(result, LineTokens{IsGap: true, Skipped: skipped})
+			}
+		}
+		result = append(result, lt)
 	}
 	return result
-}
-
-// LongestLineLen returns the character width of the longest line.
-func LongestLineLen(lines []LineTokens) int {
-	max := 0
-	for _, lt := range lines {
-		if lt.IsGap {
-			continue
-		}
-		w := 0
-		for _, tok := range lt.Tokens {
-			w += utf8.RuneCountInString(tok.Text)
-		}
-		if w > max {
-			max = w
-		}
-	}
-	return max
 }
 
 func expandTabs(s string, tabWidth int) string {

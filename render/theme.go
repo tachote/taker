@@ -2,7 +2,6 @@ package render
 
 import (
 	"image/color"
-	"strings"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/styles"
@@ -11,6 +10,7 @@ import (
 // UIColors holds all non-syntax UI element colors for a theme.
 type UIColors struct {
 	Bg              color.NRGBA
+	ChromeBg        color.NRGBA // margin around the window; derived from Bg if unset
 	TabBarBg        color.NRGBA
 	ActiveTab       color.NRGBA
 	TabBorder       color.NRGBA
@@ -92,6 +92,32 @@ var VSCodeDarkStyle = chroma.MustNewStyle("vscode-dark", chroma.StyleEntries{
 	chroma.GenericStrong:         "bold",
 })
 
+// BurpStyle mirrors Burp Suite's Pretty view: the header block is almost
+// monochrome (name barely brighter than value) and only the JSON body carries
+// color. Token types are the ones chroma's http lexer actually emits —
+// NameFunction for the method, Name/Literal for header name/value, and the
+// delegated json lexer's NameTag for keys.
+var BurpStyle = chroma.MustNewStyle("burp", chroma.StyleEntries{
+	chroma.Background:           "bg:#1b1b1b #e4e4e4",
+	chroma.Text:                 "#e4e4e4",
+	chroma.NameFunction:         "#e8e8e8", // request method
+	chroma.NameNamespace:        "#e4e4e4", // request path
+	chroma.KeywordReserved:      "#e4e4e4", // "HTTP"
+	chroma.NameException:        "#e4e4e4", // status text
+	chroma.Operator:             "#e4e4e4",
+	chroma.Punctuation:          "#e4e4e4",
+	chroma.LiteralNumber:        "#e4e4e4", // version and status code
+	chroma.Name:                 "#e4e4e4", // header name
+	chroma.Literal:              "#c6c6c6", // header value
+	chroma.NameTag:              "#cc8b3c", // json key
+	chroma.LiteralStringDouble:  "#dcdcdc", // json string value
+	chroma.LiteralString:        "#dcdcdc",
+	chroma.LiteralNumberInteger: "#6897bb", // json number
+	chroma.LiteralNumberFloat:   "#6897bb",
+	chroma.KeywordConstant:      "#6897bb", // true / false / null
+	chroma.Comment:              "#808080",
+})
+
 func builtinStyle(name string) *chroma.Style {
 	s := styles.Get(name)
 	if s == nil {
@@ -103,6 +129,28 @@ func builtinStyle(name string) *chroma.Style {
 // ── Theme definitions ────────────────────────────────────────────────────────
 
 var Themes = map[string]*Theme{
+	// Default for `taker http`: evidence that reads as a Burp screenshot.
+	// The UI fields are reused by the Burp panel header — TabBarBg is the title
+	// strip, ActiveTab the tab row, TabAccent the active tab's underline.
+	"burp": {
+		Name:   "Burp Suite (dark)",
+		Chroma: BurpStyle,
+		UI: UIColors{
+			Bg:              rgb(0x1b, 0x1b, 0x1b),
+			ChromeBg:        rgb(0x0e, 0x0e, 0x0e),
+			TabBarBg:        rgb(0x2b, 0x2b, 0x2b),
+			ActiveTab:       rgb(0x22, 0x22, 0x22),
+			TabBorder:       rgb(0x3a, 0x3a, 0x3a),
+			TabAccent:       rgb(0xe8, 0x74, 0x3b),
+			TabText:         rgb(0xe4, 0xe4, 0xe4),
+			LineNumFg:       rgb(0x80, 0x88, 0x8e),
+			GutterSep:       rgb(0x3a, 0x3a, 0x3a),
+			GapFg:           rgb(0x5a, 0x5a, 0x5a),
+			GapBg:           rgb(0x24, 0x24, 0x24),
+			HighlightBg:     redHighlight.bg,
+			HighlightBorder: redHighlight.border,
+		},
+	},
 	"vscode-dark": {
 		Name:   "VS Code Dark+",
 		Chroma: VSCodeDarkStyle,
@@ -288,104 +336,16 @@ var Themes = map[string]*Theme{
 // DefaultTheme is used when no --theme flag is provided.
 var DefaultTheme = Themes["vscode-dark"]
 
-// ── File icon helpers ────────────────────────────────────────────────────────
+// BurpTheme is the palette every HTTP capture uses. It is not selectable:
+// evidence that claims to be a proxy capture has to look like one.
+var BurpTheme = Themes["burp"]
 
-// fileIconGlyph returns the Nerd Font codepoint for the file type icon.
-func fileIconGlyph(filename string) rune {
-	lower := strings.ToLower(filename)
-	switch {
-	case strings.HasSuffix(lower, ".go"):
-		return '\ue627' // nf-seti-go
-	case strings.HasSuffix(lower, ".py"):
-		return '\ue606' // nf-dev-python
-	case strings.HasSuffix(lower, ".js"), strings.HasSuffix(lower, ".mjs"):
-		return '\ue60c' // nf-dev-javascript_badge
-	case strings.HasSuffix(lower, ".ts"), strings.HasSuffix(lower, ".tsx"):
-		return '\ue628' // nf-seti-typescript
-	case strings.HasSuffix(lower, ".jsx"):
-		return '\ue61c' // nf-dev-react
-	case strings.HasSuffix(lower, ".rs"):
-		return '\ue7a8' // nf-dev-rust
-	case strings.HasSuffix(lower, ".rb"):
-		return '\ue739' // nf-dev-ruby
-	case strings.HasSuffix(lower, ".java"):
-		return '\ue738' // nf-dev-java
-	case strings.HasSuffix(lower, ".php"):
-		return '\ue73d' // nf-dev-php
-	case strings.HasSuffix(lower, ".cs"):
-		return '\ue77f' // nf-dev-visualstudio
-	case strings.HasSuffix(lower, ".c"), strings.HasSuffix(lower, ".h"):
-		return '\ue61e' // nf-dev-c
-	case strings.HasSuffix(lower, ".cpp"), strings.HasSuffix(lower, ".hpp"):
-		return '\ue61d' // nf-dev-cplusplus
-	case strings.HasSuffix(lower, ".html"), strings.HasSuffix(lower, ".htm"):
-		return '\ue60e' // nf-dev-html5
-	case strings.HasSuffix(lower, ".css"):
-		return '\ue60b' // nf-dev-css3
-	case strings.HasSuffix(lower, ".scss"):
-		return '\ue603' // nf-dev-sass
-	case strings.HasSuffix(lower, ".json"):
-		return '\ue60b'
-	case strings.HasSuffix(lower, ".yaml"), strings.HasSuffix(lower, ".yml"):
-		return '\ue6a8' // nf-seti-yml
-	case strings.HasSuffix(lower, ".md"):
-		return '\ue609' // nf-seti-markdown
-	case strings.HasSuffix(lower, ".sh"), strings.HasSuffix(lower, ".bash"):
-		return '\ue795' // nf-seti-shell
-	case strings.HasSuffix(lower, ".sql"):
-		return '\ue706' // nf-dev-mysql
-	case strings.HasSuffix(lower, ".tf"), strings.HasSuffix(lower, ".hcl"):
-		return '\ue61f'
-	case strings.HasSuffix(lower, ".xml"):
-		return '\ue619'
-	default:
-		return '\uf15b' // nf-fa-file
-	}
-}
-
-// fileIconColor returns the Seti-style icon color by extension.
-func fileIconColor(filename string) color.NRGBA {
-	lower := strings.ToLower(filename)
-	switch {
-	case strings.HasSuffix(lower, ".go"):
-		return rgb(0x00, 0xad, 0xd8)
-	case strings.HasSuffix(lower, ".py"):
-		return rgb(0x3d, 0x79, 0xd8)
-	case strings.HasSuffix(lower, ".js"), strings.HasSuffix(lower, ".mjs"):
-		return rgb(0xf1, 0xbe, 0x42)
-	case strings.HasSuffix(lower, ".ts"), strings.HasSuffix(lower, ".tsx"):
-		return rgb(0x02, 0x7a, 0xcb)
-	case strings.HasSuffix(lower, ".yml"), strings.HasSuffix(lower, ".yaml"):
-		return rgb(0xcb, 0x17, 0x1e)
-	case strings.HasSuffix(lower, ".json"):
-		return rgb(0xf1, 0xbe, 0x42)
-	case strings.HasSuffix(lower, ".sh"), strings.HasSuffix(lower, ".bash"):
-		return rgb(0x4e, 0xaa, 0x25)
-	case strings.HasSuffix(lower, ".java"):
-		return rgb(0xb0, 0x70, 0x19)
-	case strings.HasSuffix(lower, ".rb"):
-		return rgb(0xcc, 0x34, 0x2d)
-	case strings.HasSuffix(lower, ".rs"):
-		return rgb(0xde, 0x80, 0x27)
-	case strings.HasSuffix(lower, ".php"):
-		return rgb(0x77, 0x7b, 0xb4)
-	case strings.HasSuffix(lower, ".c"), strings.HasSuffix(lower, ".cpp"),
-		strings.HasSuffix(lower, ".h"), strings.HasSuffix(lower, ".hpp"):
-		return rgb(0x00, 0x5f, 0x87)
-	case strings.HasSuffix(lower, ".cs"):
-		return rgb(0x51, 0x8c, 0xff)
-	case strings.HasSuffix(lower, ".xml"), strings.HasSuffix(lower, ".html"),
-		strings.HasSuffix(lower, ".htm"):
-		return rgb(0xe3, 0x7e, 0x33)
-	case strings.HasSuffix(lower, ".css"), strings.HasSuffix(lower, ".scss"):
-		return rgb(0x56, 0x3d, 0x7c)
-	case strings.HasSuffix(lower, ".md"):
-		return rgb(0x51, 0x9a, 0xba)
-	case strings.HasSuffix(lower, ".sql"):
-		return rgb(0xff, 0xd0, 0x00)
-	case strings.HasSuffix(lower, ".tf"), strings.HasSuffix(lower, ".hcl"):
-		return rgb(0x7b, 0x42, 0xbc)
-	default:
-		return rgb(0x89, 0x89, 0x89)
+// Derive the chrome margin from each theme's background instead of hand-picking
+// ten more colors. The hairline border does the separating work.
+func init() {
+	for _, t := range Themes {
+		if t.UI.ChromeBg == (color.NRGBA{}) {
+			t.UI.ChromeBg = mix(t.UI.Bg, rgb(0x00, 0x00, 0x00), 0.45)
+		}
 	}
 }
