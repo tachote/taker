@@ -229,7 +229,7 @@ taker --list-themes
 | Key | Name |
 |-----|------|
 | `vscode-dark` *(default)* | VS Code Dark+ |
-| `burp` | Burp Suite (dark) — always used by `taker http`, and available to `taker` |
+| `burp` | Burp Suite (dark) — used by `taker http` and **only** there: its style covers the HTTP lexer's tokens, so source code would render flat |
 | `dracula` | Dracula |
 | `nord` | Nord |
 | `catppuccin-mocha` | Catppuccin Mocha |

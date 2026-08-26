@@ -29,6 +29,10 @@ type Theme struct {
 	Name   string
 	Chroma *chroma.Style
 	UI     UIColors
+	// HTTPOnly marks a palette built for one lexer. Offering it for code is a
+	// trap: the style defines only the token types that lexer emits, so every
+	// other language falls back to the plain text color and renders flat.
+	HTTPOnly bool
 }
 
 func rgb(r, g, b uint8) color.NRGBA { return color.NRGBA{r, g, b, 0xff} }
@@ -133,8 +137,9 @@ var Themes = map[string]*Theme{
 	// The UI fields are reused by the Burp panel header — TabBarBg is the title
 	// strip, ActiveTab the tab row, TabAccent the active tab's underline.
 	"burp": {
-		Name:   "Burp Suite (dark)",
-		Chroma: BurpStyle,
+		Name:     "Burp Suite (dark)",
+		HTTPOnly: true,
+		Chroma:   BurpStyle,
 		UI: UIColors{
 			Bg:              rgb(0x1b, 0x1b, 0x1b),
 			ChromeBg:        rgb(0x0e, 0x0e, 0x0e),
