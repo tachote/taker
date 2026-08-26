@@ -179,7 +179,7 @@ func TestMarkBoxes(t *testing.T) {
 
 	// A whole-line mark is the full-bleed band.
 	got := l.markBoxes(highlight.Marks{1: {{}}}, 1, row(0, "abcdef"), 0)
-	if len(got) != 1 || got[0].x1 != l.contentX || got[0].x2 != l.highlightR {
+	if len(got) != 1 || got[0].x1 != l.contentX || got[0].x2 != l.highlightR || !got[0].wholeLine {
 		t.Errorf("whole line: got %+v", got)
 	}
 
@@ -234,7 +234,7 @@ func TestMarkBoxesDistinguishesAbsentFromEmpty(t *testing.T) {
 		t.Fatal("Has should report a present line as marked")
 	}
 	got := l.markBoxes(marked, 1, vl, 0)
-	if len(got) != 1 || got[0].x1 != l.contentX || got[0].x2 != l.highlightR {
+	if len(got) != 1 || got[0].x1 != l.contentX || got[0].x2 != l.highlightR || !got[0].wholeLine {
 		t.Errorf("marked with no spans should draw the full band, got %+v", got)
 	}
 

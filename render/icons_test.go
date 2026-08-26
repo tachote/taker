@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	customfont "github.com/tachote/taker/font"
+	"github.com/tachote/taker/highlight"
 	"golang.org/x/image/font/sfnt"
 )
 
@@ -338,5 +339,62 @@ func TestIconKeysAreReachable(t *testing.T) {
 		if name != strings.ToLower(name) {
 			t.Errorf("iconByName[%q] is not lowercase", name)
 		}
+	}
+}
+
+// A palette built for one lexer must not be offered for code: it defines only
+// that lexer's token types, so every other language falls back to the plain
+// text color and renders with no highlighting at all.
+func TestHTTPOnlyThemeCoversOnlyHTTP(t *testing.T) {
+	if !BurpTheme.HTTPOnly {
+		t.Error("burp must be marked HTTPOnly; offering it for code renders flat")
+	}
+	for name, th := range Themes {
+		if name != "burp" && th.HTTPOnly {
+			t.Errorf("theme %q is marked HTTPOnly; is that intended?", name)
+		}
+	}
+
+	// The trap, made concrete: Java keywords carry no color under this style.
+	java := "class Foo { void bar() { return; } }\n"
+	flat, err := highlight.Tokenize(java, "java", "T.java", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lit, err := highlight.Tokenize(java, "java", "T.java", VSCodeDarkStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Counting distinct colors is not enough: BurpStyle happens to define
+	// NameFunction, so Java gets #e4e4e4 and #e8e8e8 — two values four levels
+	// apart, which is flat to a human eye. Measure the spread instead.
+	spread := func(lines []highlight.LineTokens) int {
+		lo, hi := [3]int{255, 255, 255}, [3]int{0, 0, 0}
+		for _, l := range lines {
+			for _, tok := range l.Tokens {
+				for i, v := range [3]int{int(tok.R), int(tok.G), int(tok.B)} {
+					if v < lo[i] {
+						lo[i] = v
+					}
+					if v > hi[i] {
+						hi[i] = v
+					}
+				}
+			}
+		}
+		widest := 0
+		for i := range lo {
+			if d := hi[i] - lo[i]; d > widest {
+				widest = d
+			}
+		}
+		return widest
+	}
+	const perceptible = 24
+	if got := spread(flat); got >= perceptible {
+		t.Errorf("BurpStyle now spreads Java colors by %d; if it highlights code, drop HTTPOnly", got)
+	}
+	if got := spread(lit); got < perceptible {
+		t.Errorf("VSCodeDarkStyle should colour Java; spread is only %d", got)
 	}
 }

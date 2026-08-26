@@ -487,8 +487,16 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 		rowY := y
 		rowBottom := y + l.lineHeight
 
+		// A whole-line band plus a column box draws a border around the line and
+		// another inside it, which reads as a rendering fault. When a line names
+		// columns, the band keeps its wash for context and the precise marks own
+		// every border on that line.
+		precise := namesColumns(cfg.HighlightLines[vl.lineNum])
 		for _, box := range l.markBoxes(cfg.HighlightLines, vl.lineNum, vl, wrapCols) {
 			fillRect(img, image.Rect(box.x1, rowY, box.x2, rowBottom), ui.HighlightBg)
+			if box.wholeLine && precise {
+				continue
+			}
 			hlRuns = append(hlRuns, markRun{box.x1, box.x2, rowY, rowBottom})
 		}
 
@@ -566,7 +574,10 @@ func mergeRuns(rows []markRun) []markRun {
 }
 
 // markBox is the horizontal extent of one mark on one visual row.
-type markBox struct{ x1, x2 int }
+type markBox struct {
+	x1, x2    int
+	wholeLine bool
+}
 
 // markBoxes maps a line's marks onto the visual row in vl. A wrapped line
 // splits into rows of wrapCols characters, so a span may land on one row,
@@ -581,7 +592,8 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 		return nil
 	}
 	if len(spans) == 0 {
-		return []markBox{{l.contentX, l.highlightR}} // marked, but no region named
+		// Marked, but no region named.
+		return []markBox{{x1: l.contentX, x2: l.highlightR, wholeLine: true}}
 	}
 
 	rowStart, rowEnd := 1, 0 // 1-based columns covered by this visual row
@@ -594,7 +606,7 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 	for _, sp := range spans {
 		if sp.WholeLine() {
 			// Full-bleed band, like an editor's current-line highlight.
-			boxes = append(boxes, markBox{l.contentX, l.highlightR})
+			boxes = append(boxes, markBox{x1: l.contentX, x2: l.highlightR, wholeLine: true})
 			continue
 		}
 		start, end := sp.Start, sp.End
@@ -623,6 +635,16 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 		})
 	}
 	return boxes
+}
+
+// namesColumns reports whether any span on a line points at specific columns.
+func namesColumns(spans []highlight.Span) bool {
+	for _, sp := range spans {
+		if !sp.WholeLine() {
+			return true
+		}
+	}
+	return false
 }
 
 func gapLabel(skipped int) string {

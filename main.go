@@ -96,11 +96,11 @@ func runSnap(cmd *SnapCmd) {
 		fmt.Println("Available themes:")
 		for _, name := range names {
 			note := ""
-			switch name {
-			case "vscode-dark":
+			switch {
+			case name == "vscode-dark":
 				note = "  (default)"
-			case "burp":
-				note = "  (always used by `taker http`)"
+			case render.Themes[name].HTTPOnly:
+				note = "  (`taker http` only \u2014 not for code)"
 			}
 			fmt.Printf("    %-20s  %s%s\n", name, render.Themes[name].Name, note)
 		}
@@ -324,6 +324,14 @@ func resolveTheme(name string) *render.Theme {
 	theme, ok := render.Themes[strings.ToLower(name)]
 	if !ok {
 		fmt.Fprintf(os.Stderr, "taker: unknown theme %q. Run --list-themes to see options.\n", name)
+		os.Exit(1)
+	}
+	// Its style only covers the HTTP lexer's token types, so source code comes
+	// out flat — every keyword falling back to the plain text color.
+	if theme.HTTPOnly {
+		fmt.Fprintf(os.Stderr,
+			"taker: theme %q is only for `taker http`; source code renders without highlighting.\n"+
+				"       Use vscode-dark (default) or run --list-themes.\n", name)
 		os.Exit(1)
 	}
 	return theme
