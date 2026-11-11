@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"image/color"
 	"reflect"
 	"strings"
 	"testing"
@@ -178,8 +179,15 @@ func TestHTTPIsAlwaysBurp(t *testing.T) {
 }
 
 var httpConfigFields = []string{
-	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "Caption",
+	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "MaxMarks", "Caption",
 	"RequestLines", "ResponseLines", "Context", "WrapWidth",
+	// An out-parameter, not a knob: the renderer writes what it drew into it so
+	// the machine-readable report and the image's own footnote cannot disagree.
+	// It cannot change a pixel.
+	"Facts",
+	// A channel for the render's own warnings, so the CLI can put them in the
+	// report instead of leaving them on a stderr nobody reads. Not a knob either.
+	"Warn",
 }
 
 // --mark and --context have to compose: the literal is what you have, and the
@@ -220,5 +228,208 @@ func TestMarkAndContextCompose(t *testing.T) {
 	if none.Bounds().Dy() != full.Bounds().Dy() {
 		t.Errorf("an unmatched mark should not trim anything: %d vs %d",
 			none.Bounds().Dy(), full.Bounds().Dy())
+	}
+}
+
+// Burp's Pretty view colours more than a lexer parses: a header's name and its
+// value differ, a cookie's name is separated from its data, and a form body
+// separates field names from values. Losing that turns the panel into flat
+// monochrome, which is the state this test exists to prevent.
+func TestBurpColourMessage(t *testing.T) {
+	msg := "POST /doLogin HTTP/1.1\n" +
+		"Host: demo.testfire.net\n" +
+		"Set-Cookie: SID=68B9FA79D23F48A269262E622C58280D; Path=/; HttpOnly\n" +
+		"Set-Cookie: Data=0DAwMDAwZkNVcnBvcmF0ZXR4M; Path=/\n" +
+		"Content-Type: application/json\n" +
+		"\n" +
+		"uid=admin&passw=x"
+	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := burpColourMessage(lines)
+
+	tokenColour := func(line int, text string) color.NRGBA {
+		for _, tok := range got[line-1].Tokens {
+			if tok.Text == text {
+				return color.NRGBA{tok.R, tok.G, tok.B, 0xff}
+			}
+		}
+		t.Fatalf("line %d has no token %q", line, text)
+		return color.NRGBA{}
+	}
+
+	// Request line: one colour, no structure.
+	if line := got[0]; len(line.Tokens) != 1 || line.Tokens[0].R != burpLineColour.R {
+		t.Errorf("request line = %+v, want a single line-coloured run", line.Tokens)
+	}
+	// Header name and value are different colours.
+	if c := tokenColour(2, "Host:"); c != burpLineColour {
+		t.Errorf("header name = %v, want %v", c, burpLineColour)
+	}
+	if c := tokenColour(2, " demo.testfire.net"); c != burpHeaderValue {
+		t.Errorf("header value = %v, want %v", c, burpHeaderValue)
+	}
+	// A cookie: name separated, hex data left plain, attributes plain.
+	if c := tokenColour(3, "SID"); c != burpParamName {
+		t.Errorf("cookie name = %v, want %v", c, burpParamName)
+	}
+	// One class for every cookie value, hex-shaped or not: Burp's theme defines
+	// a single cookieValue colour (#A5C35B). An earlier version of this test
+	// demanded grey for the hex-shaped one, because a screenshot had been read
+	// on the wrong row — the grey belonged to the Server header above it.
+	if c := tokenColour(3, "68B9FA79D23F48A269262E622C58280D"); c != burpParamValue {
+		t.Errorf("cookie data = %v, want Burp's cookieValue %v", c, burpParamValue)
+	}
+	if c := tokenColour(3, "; Path=/; HttpOnly"); c != burpHeaderValue {
+		t.Errorf("cookie attributes = %v, want %v", c, burpHeaderValue)
+	}
+	// Data that is not an opaque hex blob is painted as data.
+	if c := tokenColour(4, "0DAwMDAwZkNVcnBvcmF0ZXR4M"); c != burpParamValue {
+		t.Errorf("cookie data = %v, want %v", c, burpParamValue)
+	}
+	// A form body: names, values and separators each get their own colour.
+	if c := tokenColour(7, "uid"); c != burpParamName {
+		t.Errorf("field name = %v, want %v", c, burpParamName)
+	}
+	if c := tokenColour(7, "admin"); c != burpParamValue {
+		t.Errorf("field value = %v, want %v", c, burpParamValue)
+	}
+	if c := tokenColour(7, "&"); c != burpLineColour {
+		t.Errorf("field separator = %v, want %v", c, burpLineColour)
+	}
+}
+
+// An HTTP/2 pseudo header's name starts with a colon of its own. Cutting at the
+// first colon makes the name empty and paints the rest of the line as a value,
+// which is how the whole header block of an HTTP/2 message gets flattened.
+func TestBurpColourPseudoHeaders(t *testing.T) {
+	msg := ":method: GET\n:authority: api.test\n:path: /v1/users?q=1\naccept: */*\n\n"
+	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := burpColourMessage(lines)
+
+	want := map[int]struct{ name, value string }{
+		1: {":method:", " GET"},
+		2: {":authority:", " api.test"},
+		3: {":path:", " /v1/users?q=1"},
+	}
+	for line, w := range want {
+		toks := got[line-1].Tokens
+		if len(toks) != 2 {
+			t.Fatalf("line %d: got %d tokens %+v, want name and value", line, len(toks), toks)
+		}
+		if toks[0].Text != w.name || toks[0].R != burpLineColour.R {
+			t.Errorf("line %d name = %q (%v), want %q in the line colour", line, toks[0].Text, toks[0], w.name)
+		}
+		if toks[1].Text != w.value || toks[1].R != burpHeaderValue.R {
+			t.Errorf("line %d value = %q (%v), want %q in the value colour", line, toks[1].Text, toks[1], w.value)
+		}
+	}
+}
+
+// A body the lexer does understand must survive the repaint untouched: JSON
+// carries its own colours, and flattening it to the header palette would be a
+// regression dressed up as consistency.
+// Measured on a capture of Burp's pretty view with a json body: the key came
+// out gold, the value green, and both the colon and the comma plain text. The
+// lexer calls them operators, which in this palette means the HTTP blue.
+func TestBurpJSONFramingIsPlainText(t *testing.T) {
+	lexed := []highlight.Token{
+		colourToken("    ", burpLineColour),
+		colourToken(`"user"`, burpNameTag),
+		colourToken(":", burpLineColour),
+		colourToken(`"test"`, burpString),
+		colourToken(",", burpLineColour),
+	}
+	got := burpBodyTokens(`    "user":"test",`, lexed)
+	want := []highlight.Token{lexed[0], lexed[1], colourToken(":", burpBodyText), lexed[3], colourToken(",", burpBodyText)}
+	if len(got) != len(want) {
+		t.Fatalf("got %d tokens, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("token %d = %q%v, want %q%v", i, got[i].Text, got[i], want[i].Text, want[i])
+		}
+	}
+}
+
+func TestBurpColourLeavesJSONContentAlone(t *testing.T) {
+	msg := "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" +
+		`{"user":"admin","pass":"hunter2"}`
+	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := append([]highlight.Token(nil), lines[3].Tokens...)
+	got := burpColourMessage(lines)
+
+	// The body's *content* keeps the colors the lexer gave it: keys, strings,
+	// numbers, booleans. The pass only repaints the framing (braces, colon,
+	// comma), which the test above pins against the capture.
+	if len(got[3].Tokens) != len(before) {
+		t.Fatalf("token count changed: %d -> %d", len(before), len(got[3].Tokens))
+	}
+	for i, tok := range got[3].Tokens {
+		if isFraming(tok.Text) {
+			if c := (color.NRGBA{tok.R, tok.G, tok.B, 0xff}); c != burpBodyText {
+				t.Errorf("framing %q = %v, want body text %v", tok.Text, c, burpBodyText)
+			}
+			continue
+		}
+		if !reflect.DeepEqual(tok, before[i]) {
+			t.Errorf("content token %q was repainted: %+v -> %+v", tok.Text, before[i], tok)
+		}
+	}
+	// The header above it did get repainted, so the pass is not a no-op.
+	if got[1].Tokens[0].R != burpLineColour.R {
+		t.Errorf("header name was not repainted: %+v", got[1].Tokens)
+	}
+}
+
+// The report has to describe the image the reader gets, so the renderer hands
+// out what it actually drew instead of letting the caller recompute the trim.
+// Marks are resolved inside the render, which is why their counts live here too.
+func TestRenderHTTPReportsWhatItDrew(t *testing.T) {
+	var body strings.Builder
+	body.WriteString("HTTP/1.1 200 OK\n\n")
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&body, "body line %d\n", i)
+	}
+	facts := &HTTPFacts{}
+	_, err := RenderHTTP(&HTTPConfig{
+		Request:  testReq,
+		Response: body.String(),
+		Mark:     []string{"body line 100"},
+		Context:  2,
+		Facts:    facts,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The message is a status line, a blank line and 200 body lines, so the
+	// mark lands on message line 102 and ±2 context gives 100-104.
+	if facts.Response.Shown != 5 {
+		t.Errorf("response view shows %d lines, want 5 around the mark", facts.Response.Shown)
+	}
+	if facts.Response.First != 100 || facts.Response.Last != 104 {
+		t.Errorf("response extent = %d-%d, want 100-104", facts.Response.First, facts.Response.Last)
+	}
+	if facts.Response.Total != 202 {
+		t.Errorf("response total = %d, want the whole message's 202 lines", facts.Response.Total)
+	}
+	if facts.Response.First > 102 || facts.Response.Last < 102 {
+		t.Error("the marked line is outside the extent the report claims")
+	}
+	if len(facts.Marks) != 1 || facts.Marks[0].Matches != 1 {
+		t.Fatalf("marks = %+v, want one literal with one match", facts.Marks)
+	}
+	// The request carries no match, so nothing was trimmed out of it: the
+	// extent has to say the view is the whole message, not that it is empty.
+	if facts.Request.Shown != facts.Request.Total || facts.Request.Shown == 0 {
+		t.Errorf("request extent = %+v, want the whole untrimmed message", facts.Request)
 	}
 }

@@ -128,8 +128,13 @@ func TestGeometryDiffersByMode(t *testing.T) {
 	if burp.headerH != burpTitleH+burpTabRowH {
 		t.Errorf("http header %d != title %d + tabs %d", burp.headerH, burpTitleH, burpTabRowH)
 	}
-	if burp.gutterL >= snap.gutterL || burp.gutterR >= snap.gutterR {
-		t.Error("Burp's gutter is narrower than an editor's")
+	// Burp reserves less room around the numbers than an editor does, even
+	// though its line numbers start further in from the pane edge (18px, where
+	// snap leaves 16): the right padding and the gap before the text are what
+	// keep the panel dense.
+	if burp.gutterL+burp.gutterR >= snap.gutterL+snap.gutterR {
+		t.Errorf("Burp's gutter %d is not tighter than an editor's %d",
+			burp.gutterL+burp.gutterR, snap.gutterL+snap.gutterR)
 	}
 }
 
@@ -355,46 +360,64 @@ func TestHTTPOnlyThemeCoversOnlyHTTP(t *testing.T) {
 		}
 	}
 
-	// The trap, made concrete: Java keywords carry no color under this style.
-	java := "class Foo { void bar() { return; } }\n"
-	flat, err := highlight.Tokenize(java, "java", "T.java", BurpStyle)
+	// This used to assert that BurpStyle renders Java flat, as a proxy for "this
+	// palette is not for code". Burp's real message-editor palette does colour a
+	// structured body — that is what it is for, and json bodies were the reason
+	// the invented palette was replaced — so the proxy is gone. What keeps the
+	// theme out of code evidence is `HTTPOnly`, which the CLI enforces by
+	// refusing `-T burp` outside `taker http`.
+	if DefaultTheme == BurpTheme {
+		t.Error("the Burp palette must not be the default for code")
+	}
+
+	// The style must still colour a *message body*, or the fidelity this
+	// palette exists for is gone.
+	body := `{"role":"admin","n":42,"ok":true}`
+	lines, err := highlight.Tokenize("POST /x HTTP/1.1\nContent-Type: application/json\n\n"+body,
+		"http", "x.http", BurpStyle)
 	if err != nil {
 		t.Fatal(err)
 	}
-	lit, err := highlight.Tokenize(java, "java", "T.java", VSCodeDarkStyle)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Counting distinct colors is not enough: BurpStyle happens to define
-	// NameFunction, so Java gets #e4e4e4 and #e8e8e8 — two values four levels
-	// apart, which is flat to a human eye. Measure the spread instead.
-	spread := func(lines []highlight.LineTokens) int {
-		lo, hi := [3]int{255, 255, 255}, [3]int{0, 0, 0}
-		for _, l := range lines {
-			for _, tok := range l.Tokens {
-				for i, v := range [3]int{int(tok.R), int(tok.G), int(tok.B)} {
-					if v < lo[i] {
-						lo[i] = v
-					}
-					if v > hi[i] {
-						hi[i] = v
-					}
-				}
-			}
+	seen := map[color.NRGBA]bool{}
+	for _, l := range lines {
+		for _, tok := range l.Tokens {
+			seen[color.NRGBA{tok.R, tok.G, tok.B, 0xff}] = true
 		}
-		widest := 0
-		for i := range lo {
-			if d := hi[i] - lo[i]; d > widest {
-				widest = d
-			}
+	}
+	for _, want := range []color.NRGBA{burpString, burpNumber, burpLiteral, burpNameTag} {
+		if !seen[want] {
+			t.Errorf("json body is missing %v; the message palette lost a class", want)
 		}
-		return widest
 	}
-	const perceptible = 24
-	if got := spread(flat); got >= perceptible {
-		t.Errorf("BurpStyle now spreads Java colors by %d; if it highlights code, drop HTTPOnly", got)
+}
+
+// The HTTP palette is not eyeballed: every value comes from Burp Suite's own
+// theme definition (burp/theme/DarkTheme.json in the application bundle,
+// colors.ui.editor.message). Gulps of anti-aliased screenshot pixels are how an
+// invented rule about "hex-looking" cookie values got into this renderer once
+// already, so the numbers are pinned here with their source.
+func TestBurpPaletteMatchesBurpTheme(t *testing.T) {
+	want := []struct {
+		role string
+		got  color.NRGBA
+		hex  uint32
+	}{
+		{"httpFirstLine/headerName", burpLineColour, 0xd1e8f9},
+		{"headerValue", burpHeaderValue, 0xbababa},
+		{"cookieName/paramName", burpParamName, 0xbbcdfF},
+		{"cookieValue/paramValue", burpParamValue, 0xa5c35b},
+		{"text", burpBodyText, 0xcecece},
+		{"literalString", burpString, 0x93c763},
+		{"literalNumber", burpNumber, 0x79c1f4},
+		{"literalBoolean", burpLiteral, 0xff9e57},
+		{"tagName/variable", burpNameTag, 0xe9c063},
+		{"comment", burpComment, 0xa3baba},
+		{"lineNumbers", BurpTheme.UI.LineNumFg, 0xa0a0a0},
+		{"gutterBorder", BurpTheme.UI.GutterSep, 0x555555},
 	}
-	if got := spread(lit); got < perceptible {
-		t.Errorf("VSCodeDarkStyle should colour Java; spread is only %d", got)
+	for _, w := range want {
+		if w.got != rgb(uint8(w.hex>>16), uint8(w.hex>>8&0xff), uint8(w.hex&0xff)) {
+			t.Errorf("%s = %v, want #%06x from Burp's theme", w.role, w.got, w.hex)
+		}
 	}
 }

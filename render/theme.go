@@ -1,6 +1,7 @@
 package render
 
 import (
+	"fmt"
 	"image/color"
 
 	"github.com/alecthomas/chroma/v2"
@@ -9,15 +10,23 @@ import (
 
 // UIColors holds all non-syntax UI element colors for a theme.
 type UIColors struct {
-	Bg              color.NRGBA
-	ChromeBg        color.NRGBA // margin around the window; derived from Bg if unset
-	TabBarBg        color.NRGBA
-	ActiveTab       color.NRGBA
-	TabBorder       color.NRGBA
-	TabAccent       color.NRGBA
-	TabText         color.NRGBA
-	LineNumFg       color.NRGBA
-	GutterSep       color.NRGBA
+	Bg        color.NRGBA
+	ChromeBg  color.NRGBA // margin around the window; derived from Bg if unset
+	TabBarBg  color.NRGBA
+	ActiveTab color.NRGBA
+	TabBorder color.NRGBA
+	TabAccent color.NRGBA
+	TabText   color.NRGBA
+	// ControlActive is the plate Burp fills behind an active toolbar toggle.
+	ControlActive color.NRGBA
+	LineNumFg     color.NRGBA
+	GutterSep     color.NRGBA
+	// Splitter and SplitterShade are the two hairline columns Burp draws between
+	// the Request and Response panes: a light edge with a darker one behind it.
+	// They are hairlines, not a filled band, and they run the full height of the
+	// image, title strip and tab row included. Snap never uses them.
+	Splitter        color.NRGBA
+	SplitterShade   color.NRGBA
 	GapFg           color.NRGBA
 	GapBg           color.NRGBA
 	HighlightBg     color.NRGBA
@@ -96,30 +105,62 @@ var VSCodeDarkStyle = chroma.MustNewStyle("vscode-dark", chroma.StyleEntries{
 	chroma.GenericStrong:         "bold",
 })
 
-// BurpStyle mirrors Burp Suite's Pretty view: the header block is almost
-// monochrome (name barely brighter than value) and only the JSON body carries
-// color. Token types are the ones chroma's http lexer actually emits —
-// NameFunction for the method, Name/Literal for header name/value, and the
-// delegated json lexer's NameTag for keys.
+// Burp's Pretty-view palette, taken from Burp Suite's own theme definition
+// (burp/theme/DarkTheme.json inside the application bundle, section
+// colors.ui.editor.message) rather than read off a screenshot. The screenshot is
+// still the acceptance test, but the values come from the source: sampling
+// anti-aliased text returns blends, and reading a colour off the wrong row is
+// how an invented rule gets into a renderer and looks measured.
+//
+// Burp names these by role, and the names are the specification: a header's name
+// and its value are different colours, a cookie's name is separated from its
+// value, and cookie and form-field roles share the same pair.
+var (
+	burpLineColour  = rgb(0xd1, 0xe8, 0xf9) // httpFirstLine, headerName, operator, separator
+	burpHeaderValue = rgb(0xba, 0xba, 0xba) // headerValue
+	burpParamName   = rgb(0xbb, 0xcd, 0xff) // cookieName, paramName
+	burpParamValue  = rgb(0xa5, 0xc3, 0x5b) // cookieValue, paramValue
+	burpBodyText    = rgb(0xce, 0xce, 0xce) // text, tagDelimiter, literalQuote
+	burpString      = rgb(0x93, 0xc7, 0x63) // literalString
+	burpNumber      = rgb(0x79, 0xc1, 0xf4) // literalNumber
+	burpLiteral     = rgb(0xff, 0x9e, 0x57) // literalBoolean, reservedWord, datatype
+	burpNameTag     = rgb(0xe9, 0xc0, 0x63) // tagName, function, variable
+	burpComment     = rgb(0xa3, 0xba, 0xba) // comment
+)
+
+// hex renders a colour for a chroma style entry, so the style and the recolour
+// pass in http.go read their colours from the same four values.
+func hex(c color.NRGBA) string { return fmt.Sprintf("#%02x%02x%02x", c.R, c.G, c.B) }
+
+// BurpStyle mirrors Burp Suite's Pretty view: the header block is painted in
+// two tones (name brighter than value) and only the body carries more colour.
+// Token types are the ones chroma's http lexer actually emits — NameFunction
+// for the method, Name/Literal for header name/value, and the delegated json
+// lexer's NameTag for keys. The finer splits Burp shows inside a header value
+// or a form body are not expressible here; http.go repaints those.
 var BurpStyle = chroma.MustNewStyle("burp", chroma.StyleEntries{
-	chroma.Background:           "bg:#1b1b1b #e4e4e4",
-	chroma.Text:                 "#e4e4e4",
-	chroma.NameFunction:         "#e8e8e8", // request method
-	chroma.NameNamespace:        "#e4e4e4", // request path
-	chroma.KeywordReserved:      "#e4e4e4", // "HTTP"
-	chroma.NameException:        "#e4e4e4", // status text
-	chroma.Operator:             "#e4e4e4",
-	chroma.Punctuation:          "#e4e4e4",
-	chroma.LiteralNumber:        "#e4e4e4", // version and status code
-	chroma.Name:                 "#e4e4e4", // header name
-	chroma.Literal:              "#c6c6c6", // header value
-	chroma.NameTag:              "#cc8b3c", // json key
-	chroma.LiteralStringDouble:  "#dcdcdc", // json string value
-	chroma.LiteralString:        "#dcdcdc",
-	chroma.LiteralNumberInteger: "#6897bb", // json number
-	chroma.LiteralNumberFloat:   "#6897bb",
-	chroma.KeywordConstant:      "#6897bb", // true / false / null
-	chroma.Comment:              "#808080",
+	chroma.Background:      "bg:#1b1b1b " + hex(burpBodyText),
+	chroma.Text:            hex(burpBodyText),
+	chroma.NameFunction:    hex(burpLineColour), // request method
+	chroma.NameNamespace:   hex(burpLineColour), // request path
+	chroma.KeywordReserved: hex(burpLiteral),    // "HTTP"
+	chroma.NameException:   hex(burpLineColour), // status text
+	chroma.Operator:        hex(burpLineColour),
+	chroma.Punctuation:     hex(burpLineColour),
+	chroma.LiteralNumber:   hex(burpNumber),      // version, status code, json number
+	chroma.Name:            hex(burpLineColour),  // header name
+	chroma.Literal:         hex(burpHeaderValue), // header value
+	// A json key is not a string to Burp: measured on a capture of its pretty
+	// view, the key and its quotes came out gold while the string value came out
+	// green, so tagName/variable is the role the key is wearing.
+	chroma.NameTag:              hex(burpNameTag), // json key, xml tag
+	chroma.NameAttribute:        hex(burpNameTag),
+	chroma.LiteralStringDouble:  hex(burpString),
+	chroma.LiteralString:        hex(burpString),
+	chroma.LiteralNumberInteger: hex(burpNumber),
+	chroma.LiteralNumberFloat:   hex(burpNumber),
+	chroma.KeywordConstant:      hex(burpLiteral), // true / false / null
+	chroma.Comment:              hex(burpComment),
 })
 
 func builtinStyle(name string) *chroma.Style {
@@ -144,13 +185,16 @@ var Themes = map[string]*Theme{
 			Bg:              rgb(0x1b, 0x1b, 0x1b),
 			ChromeBg:        rgb(0x0e, 0x0e, 0x0e),
 			TabBarBg:        rgb(0x2b, 0x2b, 0x2b),
-			ActiveTab:       rgb(0x22, 0x22, 0x22),
-			TabBorder:       rgb(0x3a, 0x3a, 0x3a),
-			TabAccent:       rgb(0xe8, 0x74, 0x3b),
-			TabText:         rgb(0xe4, 0xe4, 0xe4),
-			LineNumFg:       rgb(0x80, 0x88, 0x8e),
-			GutterSep:       rgb(0x3a, 0x3a, 0x3a),
-			GapFg:           rgb(0x5a, 0x5a, 0x5a),
+			ActiveTab:       rgb(0x2b, 0x2b, 0x2b), // the tab row shares the title strip
+			TabBorder:       rgb(0x52, 0x52, 0x55),
+			TabAccent:       rgb(0xcc, 0x68, 0x3d),
+			TabText:         rgb(0xff, 0xff, 0xff),
+			ControlActive:   rgb(0x37, 0x63, 0x99),
+			LineNumFg:       rgb(0xa0, 0xa0, 0xa0),
+			GutterSep:       rgb(0x55, 0x55, 0x55),
+			Splitter:        rgb(0x52, 0x52, 0x55),
+			SplitterShade:   rgb(0x3e, 0x3e, 0x40),
+			GapFg:           rgb(0x81, 0x81, 0x81),
 			GapBg:           rgb(0x24, 0x24, 0x24),
 			HighlightBg:     redHighlight.bg,
 			HighlightBorder: redHighlight.border,
@@ -168,6 +212,8 @@ var Themes = map[string]*Theme{
 			TabText:         rgb(0xcc, 0xcc, 0xcc),
 			LineNumFg:       rgb(0x85, 0x85, 0x85),
 			GutterSep:       rgb(0x3c, 0x3c, 0x3c),
+			Splitter:        rgb(0x3c, 0x3c, 0x3c),
+			SplitterShade:   rgb(0x2a, 0x2a, 0x2a),
 			GapFg:           rgb(0x4e, 0x4e, 0x4e),
 			GapBg:           rgb(0x25, 0x25, 0x26),
 			HighlightBg:     redHighlight.bg,

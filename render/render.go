@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	customfont "github.com/tachote/taker/font"
@@ -30,13 +31,21 @@ const (
 	gutterPadL    = 16
 	codeGutterGap = 16
 
-	// Burp's panels are denser than an editor's and its gutter is narrower.
-	burpLineHeightMul = 1.25
-	burpTitleH        = 32
-	burpTabRowH       = 34
-	burpTabUnderlineH = 2
-	burpPadY          = 8
-	burpGutterPadL    = 10
+	// Burp's panels are denser than an editor's. Its gutter reserves two digit
+	// cells and leaves the line numbers 18px in from the pane edge, with a
+	// hairline rule after them. The header is tall: a title band over a tab row
+	// of the same colour, closed by a 2px border — the height is what makes the
+	// panel read as a Repeater pane rather than a code block. The row height is
+	// the face's own line box with no added leading, as in Burp's editor: the
+	// multiplier stays under 1 to mean exactly that, because a row taller than
+	// its font is what made the panel look airy next to a real capture.
+	burpLineHeightMul = 0.98
+	burpTitleH        = 109
+	burpTabRowH       = 46
+	burpTabUnderlineH = 6
+	burpTabBorderH    = 2
+	burpPadY          = 4
+	burpGutterPadL    = 18
 	burpGutterPadR    = 12
 	burpCodeGutterGap = 10
 	burpTitleX        = 12
@@ -71,6 +80,21 @@ type Config struct {
 	HTTPMode       bool   // panel header instead of tab bar; caller adds chrome
 	MinHeight      int    // pad the panel to at least this height
 	Caption        string // optional strip stating what the image proves
+	// TotalLines is how many lines the file has, so a trimmed view can say what
+	// it left out. 0 means unknown and prints no note.
+	TotalLines int
+	// SourceRef names the revision the code was read from, e.g.
+	// "src/auth/login.py @ 9f344fad66cf". It travels in the footnote because the
+	// code in the image has to be checkable against the commit being reported,
+	// and a screenshot that does not name its revision cannot be checked at all.
+	SourceRef string
+
+	// Warn, when set, receives the warnings this render produces — a cropped view
+	// that lost marks, a character the font cannot draw, an image taller than a
+	// viewer opens. The CLI routes them into its machine-readable report so a
+	// consumer sees the same caveats the analyst sees; left nil they go to
+	// stderr, which is what a caller rendering for its own eyes wants.
+	Warn func(msg string)
 
 	httpTabs []burpTab // view strip for an HTTP panel
 
@@ -254,6 +278,10 @@ type geom struct {
 	gutterL int
 	gutterR int
 	codeGap int
+	// canvasPadR is the margin between the widest row and the panel's right
+	// edge. It is part of the layout, not a style choice: the wrap decision
+	// measures against it, so it has to match what the layout actually leaves.
+	canvasPadR int
 }
 
 // geometryFor returns the spacing for a mode. HTTP panels imitate Burp Suite's
@@ -261,21 +289,23 @@ type geom struct {
 func geometryFor(httpMode bool) geom {
 	if httpMode {
 		return geom{
-			lineMul: burpLineHeightMul,
-			headerH: burpTitleH + burpTabRowH,
-			padY:    burpPadY,
-			gutterL: burpGutterPadL,
-			gutterR: burpGutterPadR,
-			codeGap: burpCodeGutterGap,
+			lineMul:    burpLineHeightMul,
+			headerH:    burpTitleH + burpTabRowH,
+			padY:       burpPadY,
+			gutterL:    burpGutterPadL,
+			gutterR:    burpGutterPadR,
+			codeGap:    burpCodeGutterGap,
+			canvasPadR: burpGutterPadR,
 		}
 	}
 	return geom{
-		lineMul: lineHeightMul,
-		headerH: tabBarHeight,
-		padY:    paddingY,
-		gutterL: gutterPadL,
-		gutterR: gutterPadR,
-		codeGap: codeGutterGap,
+		lineMul:    lineHeightMul,
+		headerH:    tabBarHeight,
+		padY:       paddingY,
+		gutterL:    gutterPadL,
+		gutterR:    gutterPadR,
+		codeGap:    codeGutterGap,
+		canvasPadR: paddingX,
 	}
 }
 
@@ -312,8 +342,9 @@ func buildLayout(cfg *Config, m *metrics, vlines []visualLine, digits, gutterW i
 
 	// neededW is content only: it drives the auto-wrap decision, and wrapping
 	// cannot make an over-long title fit. The header widens the canvas but must
-	// not make short code look like it overflowed.
-	neededW := codeX + contentW + paddingX
+	// not make short code look like it overflowed. HTTP panels use the Burp
+	// right gutter, not snap's editor padding, or the panel wraps ~20px early.
+	neededW := codeX + contentW + g.canvasPadR
 	totalW := neededW
 	if hw := headerWidth(m, cfg); hw > totalW {
 		totalW = hw
@@ -356,12 +387,12 @@ func buildLayout(cfg *Config, m *metrics, vlines []visualLine, digits, gutterW i
 // for an HTTP panel that is the tab row, which is wider than the title.
 func headerWidth(m *metrics, cfg *Config) int {
 	if cfg.HTTPMode {
-		w := burpTitleX
-		for _, tab := range cfg.httpTabs {
-			w += textWidth(m.uiFace, tab.label) + 2*burpTabGap
+		tab := 0
+		for _, t := range cfg.httpTabs {
+			tab += textWidth(m.uiFace, t.label) + burpTabPitch
 		}
 		// Keep the tabs and the control strip from touching on a narrow panel.
-		return w + burpControlsGap + burpControlsWidth(m) + burpTitleX
+		return tab + burpControlsGap + burpControlsWidth(m) + burpTitleX
 	}
 	return tabPad + m.iconW + tabIconGap + textWidth(m.face, cfg.Title) + tabPad
 }
@@ -377,7 +408,7 @@ func MaxWrapCols(httpMode bool) int {
 	}
 	g := geometryFor(httpMode)
 	gutterW := g.gutterL + m.charWidth + g.gutterR // one digit
-	cols := (maxImageWidth - (gutterW + 1 + g.codeGap) - paddingX) / m.charWidth
+	cols := (maxImageWidth - (gutterW + 1 + g.codeGap) - g.canvasPadR) / m.charWidth
 	if cols < minContentChars {
 		return minContentChars
 	}
@@ -401,7 +432,7 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	// Columns that still fit inside the canvas cap. Anything past this would be
 	// cropped off the right edge, which is exactly the silent evidence loss the
 	// auto-wrap below exists to prevent.
-	fitCols := (maxImageWidth - (gutterW + 1 + g.codeGap) - paddingX) / m.charWidth
+	fitCols := (maxImageWidth - (gutterW + 1 + g.codeGap) - g.canvasPadR) / m.charWidth
 	if fitCols < minContentChars {
 		fitCols = minContentChars
 	}
@@ -434,8 +465,7 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	if wrapCols == 0 && l.neededWidth > maxImageWidth {
 		wrapCols = fitCols
 		if !cfg.noWarn {
-			fmt.Fprintf(os.Stderr,
-				"taker: content exceeds %dpx; wrapping at %d columns (use --wrap-width to override)\n",
+			cfg.warnf("content exceeds %dpx; wrapping at %d columns (use --wrap-width to override)",
 				maxImageWidth, wrapCols)
 		}
 		vlines = buildVisualLines(cfg.Lines, wrapCols)
@@ -450,18 +480,16 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 			cfg.Title, l.totalHeight, maxImageHeight)
 	}
 	if l.totalHeight > warnImageHeight && !cfg.noWarn {
-		fmt.Fprintf(os.Stderr,
-			"taker: warning: %q is %dpx tall; --context or a line range makes it readable\n",
-			cfg.Title, l.totalHeight)
+		cfg.warnf("%q is %dpx tall; --context or a line range makes it readable", cfg.Title, l.totalHeight)
 	}
 
 	img := image.NewNRGBA(image.Rect(0, 0, l.totalWidth, l.totalHeight))
 
-	// Pass 1: backgrounds. Burp draws no rule between gutter and text.
+	// Pass 1: backgrounds. The gutter rule is a hairline between the line
+	// numbers and the text: snap has always had one, and Burp's message editor
+	// has one too, so both modes draw it.
 	fillRect(img, image.Rect(0, 0, l.totalWidth, l.totalHeight), ui.Bg)
-	if !cfg.HTTPMode {
-		fillRect(img, image.Rect(l.gutterW, l.codeAreaY, l.gutterW+1, l.totalHeight), ui.GutterSep)
-	}
+	fillRect(img, image.Rect(l.gutterW, l.codeAreaY, l.gutterW+1, l.totalHeight), ui.GutterSep)
 
 	// Pass 2: header
 	if cfg.HTTPMode {
@@ -501,13 +529,19 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 		}
 
 		// Line number on the first visual row only; continuation rows get a
-		// subtle wrap arrow in the gutter instead.
+		// subtle wrap arrow in the gutter instead. Drawn after the highlight
+		// wash (above) so a whole-line mark never paints over the number.
 		baseline := l.baselineIn(rowY, l.lineHeight)
 		switch {
 		case !vl.isContinuation:
 			lineNumStr := fmt.Sprintf("%*d", l.digits, vl.lineNum)
 			numX := l.gutterW - l.gutterR - l.digits*l.charWidth
-			drawString(img, l.face, lineNumStr, numX, baseline, ui.LineNumFg)
+			numFg := ui.LineNumFg
+			if _, marked := cfg.HighlightLines[vl.lineNum]; marked {
+				// Keep the number legible on top of the mark wash.
+				numFg = ui.TabText
+			}
+			drawString(img, l.face, lineNumStr, numX, baseline, numFg)
 		case !cfg.HTTPMode:
 			// Burp leaves the gutter blank on wrapped rows; the missing number
 			// is the marker. Snap gets an explicit arrow.
@@ -530,10 +564,23 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	// report. Judge it on the boxes actually drawn, not on whether the line
 	// numbers exist: "7:900-999" names a real line and no real columns.
 	if !cfg.noWarn && len(cfg.HighlightLines) > 0 && len(hlRuns) == 0 {
-		fmt.Fprintf(os.Stderr,
-			"taker: warning: nothing was marked in %q; the requested lines or columns are not in the output\n",
-			cfg.Title)
+		cfg.warnf("nothing was marked in %q; the requested lines or columns are not in the output", cfg.Title)
 	}
+
+	// The quiet half of the same failure: with one mark inside the view and one
+	// outside it, an image with a single box is written in silence while the
+	// analyst's note says two lines are highlighted. The count of a --mark
+	// literal is reported for the whole input, so without this the tool states
+	// the matches it found and shows fewer.
+	if !cfg.noWarn && len(hlRuns) > 0 {
+		if absent := marksOutsideView(cfg.HighlightLines, vlines); len(absent) > 0 {
+			cfg.warnf("marked %s %s %s not in the %q output",
+				plural(len(absent), "line", "lines"), compressRanges(absent),
+				plural(len(absent), "is", "are"), cfg.Title)
+		}
+	}
+
+	reportUndrawable(cfg, vlines)
 
 	// Pass 4: one border per contiguous run of equally-wide marked rows
 	for _, run := range mergeRuns(hlRuns) {
@@ -544,9 +591,12 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	if cfg.HTTPMode {
 		return img, nil // caller composes the panels, then adds the caption
 	}
-	// Caption goes outside the window: it annotates the screenshot, it is not
-	// part of the editor being screenshotted.
-	return withCaption(applyChrome(img, ui), cfg.Caption, ui, m), nil
+	// Caption and footnote go outside the window: they annotate the screenshot,
+	// they are not part of the editor being screenshotted. The footnote sits
+	// inside the caption, closest to the code it describes.
+	out := applyChrome(img, ui)
+	out = withFootnote(out, joinNotes(cfg.SourceRef, cropNote("", cfg.Lines, cfg.TotalLines)), ui, m)
+	return withCaption(out, cfg.Caption, ui, m), nil
 }
 
 // markRun is one marked rectangle. Column marks make the horizontal extent
@@ -592,8 +642,11 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 		return nil
 	}
 	if len(spans) == 0 {
-		// Marked, but no region named.
-		return []markBox{{x1: l.contentX, x2: l.highlightR, wholeLine: true}}
+		// Marked, but no region named. Start the band at the pane's left edge
+		// so its wash sits behind the line number too: the number is the
+		// reader's anchor and must not be swallowed by a half-covered band,
+		// and the band reads as a full row the way Burp's line selection does.
+		return []markBox{{x1: 0, x2: l.highlightR, wholeLine: true}}
 	}
 
 	rowStart, rowEnd := 1, 0 // 1-based columns covered by this visual row
@@ -605,8 +658,10 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 	var boxes []markBox
 	for _, sp := range spans {
 		if sp.WholeLine() {
-			// Full-bleed band, like an editor's current-line highlight.
-			boxes = append(boxes, markBox{x1: l.contentX, x2: l.highlightR, wholeLine: true})
+			// Full-bleed band, like an editor's current-line highlight. It starts
+			// at 0 so the gutter and its number are inside the wash rather than
+			// half-covered by it.
+			boxes = append(boxes, markBox{x1: 0, x2: l.highlightR, wholeLine: true})
 			continue
 		}
 		start, end := sp.Start, sp.End
@@ -786,6 +841,15 @@ func drawString(img *image.NRGBA, face font.Face, s string, x, baseline int, c c
 	d.DrawString(s)
 }
 
+// drawStringBold thickens a string by re-drawing it one pixel to the right.
+// The binary embeds JetBrains Mono Regular only — a bold face would add ~250KB
+// of font for one word per panel — and at 2x a one-pixel smear is what a bold
+// weight looks like at this size.
+func drawStringBold(img *image.NRGBA, face font.Face, s string, x, baseline int, c color.NRGBA) {
+	drawString(img, face, s, x, baseline, c)
+	drawString(img, face, s, x+1, baseline, c)
+}
+
 func fillRect(img *image.NRGBA, r image.Rectangle, c color.NRGBA) {
 	draw.Draw(img, r, image.NewUniform(c), image.Point{}, draw.Src)
 }
@@ -804,7 +868,200 @@ const (
 	captionBarW    = 4
 	captionMinPad  = 28 // space kept to the right of the text
 	captionLineMul = 1.45
+
+	// The footnote is the tool's own voice about the crop: smaller, dimmer and
+	// tighter than the analyst's caption, so the two are never mistaken.
+	footnoteGap     = 6
+	footnotePadY    = 6
+	footnoteLineMul = 1.25
 )
+
+// warnf reports one caveat about the image, through the caller's channel when
+// there is one.
+func (cfg *Config) warnf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if cfg.Warn != nil {
+		cfg.Warn(msg)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "taker: warning: %s\n", msg)
+}
+
+// reportUndrawable warns when the view contains characters the embedded font
+// cannot draw. They come out as empty boxes, and a box where a value should be
+// is the worst kind of evidence defect: it looks like a rendering quirk rather
+// than a missing value, so a reader assumes the pixel is fine and moves on.
+func reportUndrawable(cfg *Config, vlines []visualLine) {
+	if cfg.noWarn {
+		return
+	}
+	seen := map[rune]bool{}
+	var missing []rune
+	total := 0
+	for _, vl := range vlines {
+		if vl.isGap {
+			continue
+		}
+		for _, tok := range vl.tokens {
+			for _, r := range tok.Text {
+				if unicode.IsSpace(r) || unicode.IsControl(r) || seen[r] {
+					continue
+				}
+				if drawable, known := customfont.CanDraw(r); known && !drawable {
+					seen[r] = true
+					total++
+					if len(missing) < 8 {
+						missing = append(missing, r)
+					}
+				}
+			}
+		}
+	}
+	if total == 0 {
+		return
+	}
+	shown := string(missing)
+	if total > len(missing) {
+		shown += "\u2026"
+	}
+	cfg.warnf("%d %s in %q have no glyph in the embedded font and render as empty boxes: %s",
+		total, plural(total, "character", "characters"), cfg.Title, shown)
+}
+
+// marksOutsideView returns the marked lines the view does not contain, so a
+// mark that fell out of --lines / --context / --nr / --ns can be reported
+// instead of silently disappearing.
+func marksOutsideView(marks highlight.Marks, vlines []visualLine) []int {
+	visible := make(map[int]bool, len(vlines))
+	for _, vl := range vlines {
+		if !vl.isGap {
+			visible[vl.lineNum] = true
+		}
+	}
+	var absent []int
+	for _, ln := range marks.Lines() {
+		if !visible[ln] {
+			absent = append(absent, ln)
+		}
+	}
+	return absent
+}
+
+// compressRanges renders [4 9 10 11] as "4, 9-11": a list of 40 scattered line
+// numbers is not a message anyone reads.
+func compressRanges(nums []int) string {
+	var parts []string
+	for i := 0; i < len(nums); {
+		j := i
+		for j+1 < len(nums) && nums[j+1] == nums[j]+1 {
+			j++
+		}
+		if j == i {
+			parts = append(parts, strconv.Itoa(nums[i]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", nums[i], nums[j]))
+		}
+		i = j + 1
+	}
+	return strings.Join(parts, ", ")
+}
+
+// plural picks the singular or plural form; it exists so the messages above
+// read as sentences rather than as "%d line(s)".
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+// withFootnote appends a muted line stating what the view leaves out. Trimmed
+// evidence that does not say it was trimmed reads as the whole message: the
+// releaser cannot tell a 9-line response from the first 9 lines of a 3000-line
+// one, and an image that hides its own extent is not evidence, it is an
+// assertion. Muted, and without the caption's accent bar: this is the tool
+// describing the crop, not the analyst making a claim.
+func withFootnote(shot *image.NRGBA, text string, ui UIColors, m *metrics) *image.NRGBA {
+	if text == "" {
+		return shot
+	}
+	sw, sh := shot.Bounds().Dx(), shot.Bounds().Dy()
+	// Aligned with the caption's text rather than with the window edge: the two
+	// strips stack, and a note starting where the caption's bar is would read as
+	// a stray label rather than a second line.
+	textX := captionPadX + captionBarW + captionPadX
+
+	avail := sw - textX - captionMinPad
+	lines := wrapWords(m.face, text, avail)
+	if len(lines) == 0 {
+		return shot
+	}
+	if len(lines) == 1 {
+		if w := textX + textWidth(m.face, lines[0]) + captionMinPad; w > sw {
+			sw = w
+		}
+	}
+	stripH := footnotePadY*2 + len(lines)*m.lineHeightFor(footnoteLineMul)
+
+	out := image.NewNRGBA(image.Rect(0, 0, sw, sh+footnoteGap+stripH))
+	fillRect(out, out.Bounds(), ui.ChromeBg)
+	draw.Draw(out, shot.Bounds(), shot, shot.Bounds().Min, draw.Src)
+
+	top := sh + footnoteGap
+	lineH := m.lineHeightFor(footnoteLineMul)
+	for i, line := range lines {
+		y := top + footnotePadY + i*lineH
+		drawString(out, m.face, line, textX, m.baselineIn(y, lineH), ui.LineNumFg)
+	}
+	return out
+}
+
+// cropNote describes a view that does not hold every line of its message. It
+// reports the range when the kept lines are contiguous and the bare count when
+// they are not, because "lines 4-12 of 87" and "3 of 87 lines" are different
+// claims and only one of them is true at a time. Empty when nothing was left
+// out: a note on every image would be noise, and noise stops being read.
+func cropNote(label string, shown []highlight.LineTokens, total int) string {
+	ext := highlight.Extent(shown)
+	if ext.Shown == 0 {
+		return ""
+	}
+
+	// An excerpt (--first-line) leaves the file's length unknown. Nothing was
+	// cropped out of what was rendered, but a reader still cannot tell an
+	// excerpt from a whole file — the same question this note exists to answer.
+	if total <= 0 {
+		if ext.First <= 1 {
+			return ""
+		}
+		return prefix(label, fmt.Sprintf("lines %d-%d of the excerpt", ext.First, ext.Last))
+	}
+	if ext.Shown == total {
+		return ""
+	}
+	if ext.Last-ext.First+1 == ext.Shown {
+		return prefix(label, fmt.Sprintf("lines %d-%d of %d", ext.First, ext.Last, total))
+	}
+	return prefix(label, fmt.Sprintf("%d of %d lines", ext.Shown, total))
+}
+
+func prefix(label, note string) string {
+	if label == "" {
+		return note
+	}
+	return label + ": " + note
+}
+
+// joinNotes renders the per-pane crop notes as one strip.
+func joinNotes(notes ...string) string {
+	var kept []string
+	for _, n := range notes {
+		if n != "" {
+			kept = append(kept, n)
+		}
+	}
+	return strings.Join(kept, "  \u00b7  ")
+}
 
 // withCaption appends a strip stating what the image proves. Evidence that
 // travels into a report is read by someone who was not there: a red box says

@@ -177,9 +177,10 @@ func TestMarkBoxes(t *testing.T) {
 	}
 	cw := m.charWidth
 
-	// A whole-line mark is the full-bleed band.
+	// A whole-line mark is the full-bleed band, starting at the pane's left edge
+	// so the wash covers the line number instead of half-covering it.
 	got := l.markBoxes(highlight.Marks{1: {{}}}, 1, row(0, "abcdef"), 0)
-	if len(got) != 1 || got[0].x1 != l.contentX || got[0].x2 != l.highlightR || !got[0].wholeLine {
+	if len(got) != 1 || got[0].x1 != 0 || got[0].x2 != l.highlightR || !got[0].wholeLine {
 		t.Errorf("whole line: got %+v", got)
 	}
 
@@ -234,7 +235,7 @@ func TestMarkBoxesDistinguishesAbsentFromEmpty(t *testing.T) {
 		t.Fatal("Has should report a present line as marked")
 	}
 	got := l.markBoxes(marked, 1, vl, 0)
-	if len(got) != 1 || got[0].x1 != l.contentX || got[0].x2 != l.highlightR || !got[0].wholeLine {
+	if len(got) != 1 || got[0].x1 != 0 || got[0].x2 != l.highlightR || !got[0].wholeLine {
 		t.Errorf("marked with no spans should draw the full band, got %+v", got)
 	}
 
@@ -388,5 +389,142 @@ func TestLongTitleDoesNotTriggerContentWrap(t *testing.T) {
 	})
 	if strings.Contains(warned, "content exceeds") {
 		t.Errorf("a long title blamed the content: %q", warned)
+	}
+}
+
+// A trimmed view that does not say it was trimmed reads as the whole message:
+// the releaser cannot tell a 9-line response from the first 9 lines of a
+// 3000-line one. These are the two claims the note is allowed to make.
+func TestCropNote(t *testing.T) {
+	shown := func(nums ...int) []highlight.LineTokens {
+		out := make([]highlight.LineTokens, 0, len(nums))
+		for _, n := range nums {
+			out = append(out, highlight.LineTokens{LineNum: n, Tokens: []highlight.Token{{Text: "x"}}})
+		}
+		return out
+	}
+	withGap := func(nums ...int) []highlight.LineTokens {
+		out := shown(nums...)
+		return append([]highlight.LineTokens{{IsGap: true, Skipped: 40}}, out...)
+	}
+
+	cases := []struct {
+		name  string
+		shown []highlight.LineTokens
+		total int
+		want  string
+	}{
+		{"nothing left out", shown(1, 2, 3), 3, ""},
+		{"contiguous window", shown(4, 5, 6), 87, "lines 4-6 of 87"},
+		{"split window counts", shown(1, 50), 300, "2 of 300 lines"},
+		// A gap row is a band saying "40 lines skipped", not a line: it must not
+		// be counted as content, in either direction.
+		{"gap rows do not inflate the count", withGap(1, 50), 300, "2 of 300 lines"},
+		{"contiguous window with a gap", withGap(1, 2), 300, "lines 1-2 of 300"},
+		{"labelled", shown(9), 40, "lines 9-9 of 40"},
+		{"an excerpt at line 1 claims nothing", shown(1), 0, ""},
+		// An excerpt from the middle of a file: the numbers are real, and the
+		// reader is told the rest of the file is not in the image.
+		{"excerpt from the middle", shown(59, 60, 61), 0, "lines 59-61 of the excerpt"},
+	}
+	for _, c := range cases {
+		if got := cropNote("", c.shown, c.total); got != c.want {
+			t.Errorf("%s: cropNote = %q, want %q", c.name, got, c.want)
+		}
+	}
+	if got := cropNote("Response", shown(2, 3, 4), 9); got != "Response: lines 2-4 of 9" {
+		t.Errorf("labelled note = %q", got)
+	}
+	if got := joinNotes("", "Response: lines 2-4 of 9", ""); got != "Response: lines 2-4 of 9" {
+		t.Errorf("joinNotes = %q", got)
+	}
+	if got := joinNotes("Request: 2 of 9 lines", "Response: lines 2-4 of 9"); !strings.Contains(got, "Request") || !strings.Contains(got, "Response") {
+		t.Errorf("joinNotes dropped a pane: %q", got)
+	}
+}
+
+// The note has to reach the image, not just the function: a caption-only render
+// and a cropped-and-captioned render must not be the same height.
+func TestRenderFootnoteReachesTheImage(t *testing.T) {
+	all, err := highlight.Tokenize("a=1\nb=2\nc=3\nd=4\ne=5\n", "http", "x.http", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same visible lines, different truth about the total: that isolates the
+	// footnote instead of measuring the crop itself.
+	same := all[1:3]
+	lying := &Config{Lines: same, Title: "t", TotalLines: 2}
+	honest := &Config{Lines: same, Title: "t", TotalLines: len(all)}
+
+	a, err := Render(lying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Render(honest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Bounds().Dy() <= a.Bounds().Dy() {
+		t.Errorf("the note added no height: %d vs %d", b.Bounds().Dy(), a.Bounds().Dy())
+	}
+	if b.Bounds().Dx() != a.Bounds().Dx() {
+		t.Errorf("the note changed the width: %d vs %d", b.Bounds().Dx(), a.Bounds().Dx())
+	}
+}
+
+// A mark that falls outside the view disappears without a word, and the image
+// then shows one box while the analyst's note says two lines are highlighted —
+// or, worse, while the tool itself has just reported "2 matches". The count is
+// computed over the whole input, so the view has to account for the difference.
+func TestWarnsWhenOnlySomeMarksAreInView(t *testing.T) {
+	all, err := highlight.Tokenize("a=1\nSECRET=2\nSECRET=3\nd=4\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := append([]highlight.LineTokens(nil), all[0:2]...) // lines 1-2 only
+
+	warned := captureStderr(t, func() {
+		if _, err := Render(&Config{
+			Lines: view, Title: "t", Theme: DefaultTheme,
+			HighlightLines: highlight.Marks{1: {{}}, 3: {{}}, 4: {{}}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(warned, "marked lines 3-4 are not in") {
+		t.Errorf("missing report of the marks left out; stderr: %q", warned)
+	}
+	// One mark is drawn, so the older "nothing was marked" message must not fire
+	// too: two warnings for one cause reads as two problems.
+	if warnings := strings.Count(warned, "taker: warning:"); warnings != 1 {
+		t.Errorf("got %d warnings, want 1: %q", warnings, warned)
+	}
+
+	// Nothing in view: the original message, and only that one.
+	warned = captureStderr(t, func() {
+		if _, err := Render(&Config{
+			Lines: view, Title: "t", Theme: DefaultTheme, HighlightLines: highlight.Marks{3: {{}}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if !strings.Contains(warned, "nothing was marked") || strings.Contains(warned, "marked line 3 is") {
+		t.Errorf("stderr: %q", warned)
+	}
+}
+
+func TestCompressRanges(t *testing.T) {
+	cases := []struct {
+		in   []int
+		want string
+	}{
+		{[]int{4}, "4"},
+		{[]int{4, 9, 10, 11}, "4, 9-11"},
+		{[]int{1, 2, 3, 5, 7, 8}, "1-3, 5, 7-8"},
+	}
+	for _, c := range cases {
+		if got := compressRanges(c.in); got != c.want {
+			t.Errorf("compressRanges(%v) = %q, want %q", c.in, got, c.want)
+		}
 	}
 }

@@ -226,3 +226,52 @@ func parseSpan(seg, colSpec string) (Span, error) {
 	}
 	return Span{Start: start, End: end}, nil
 }
+
+// ShiftLines renumbers the slice so its first line is firstLine, keeping any
+// gap sentinels where they are. Pass 1 to leave the input alone.
+//
+// It exists for excerpts. Rendering a whole 2000-line file to show one line is
+// not evidence anyone reads, and piping just the vulnerable function numbers it
+// from 1 — which puts a line number in the image that is not the file's. A
+// gutter is read as ground truth, so it has to be either right or absent.
+func ShiftLines(lines []LineTokens, firstLine int) []LineTokens {
+	if firstLine <= 1 {
+		return lines
+	}
+	delta := firstLine - 1
+	out := make([]LineTokens, len(lines))
+	for i, lt := range lines {
+		if !lt.IsGap {
+			lt.LineNum += delta
+		}
+		out[i] = lt
+	}
+	return out
+}
+
+// ViewExtent is the range a view covers, in the source's own numbering: the
+// first and last line numbers it keeps, and how many real lines it holds. Gap
+// rows stand for lines that were left out, so they do not count.
+type ViewExtent struct {
+	First int
+	Last  int
+	Shown int
+}
+
+// Extent measures a view. The image's own footnote and the machine-readable
+// report both read this, because two countings of the same view is how a report
+// starts disagreeing with what the reader sees.
+func Extent(lines []LineTokens) ViewExtent {
+	var ext ViewExtent
+	for _, lt := range lines {
+		if lt.IsGap {
+			continue
+		}
+		if ext.Shown == 0 {
+			ext.First = lt.LineNum
+		}
+		ext.Last = lt.LineNum
+		ext.Shown++
+	}
+	return ext
+}
