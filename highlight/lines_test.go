@@ -273,3 +273,37 @@ func TestContextSpec(t *testing.T) {
 		t.Errorf("no context should give no spec, got %v", got)
 	}
 }
+
+// A gutter is read as ground truth. Numbering an excerpt from 1 puts a line
+// number in the image that is not the file's, which is the one kind of error
+// evidence must not make.
+func TestShiftLines(t *testing.T) {
+	lines := []LineTokens{
+		{LineNum: 1, Tokens: []Token{{Text: "a"}}},
+		{LineNum: 2, Tokens: []Token{{Text: "b"}}},
+		{IsGap: true, Skipped: 40},
+		{LineNum: 3, Tokens: []Token{{Text: "c"}}},
+	}
+
+	got := ShiftLines(lines, 500)
+	want := []int{500, 501, 0, 502}
+	for i, w := range want {
+		if w == 0 {
+			if !got[i].IsGap {
+				t.Errorf("line %d: gap sentinel was renumbered into a line", i)
+			}
+			continue
+		}
+		if got[i].LineNum != w {
+			t.Errorf("line %d = %d, want %d", i, got[i].LineNum, w)
+		}
+	}
+	// The input must not be touched: the caller may still need the original.
+	if lines[0].LineNum != 1 {
+		t.Errorf("input was modified: first line is now %d", lines[0].LineNum)
+	}
+	// 1 is the default and has to be a no-op.
+	if got := ShiftLines(lines, 1); got[0].LineNum != 1 {
+		t.Errorf("first-line 1 shifted the input: %d", got[0].LineNum)
+	}
+}
