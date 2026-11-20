@@ -74,6 +74,9 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 				lines = append(lines, current)
 				current = LineTokens{LineNum: current.LineNum + 1}
 			}
+			// A CRLF capture leaves \r on every part: it draws as a blank
+			// glyph that pads the row and inflates the column count.
+			part = strings.TrimSuffix(part, "\r")
 			if part != "" {
 				current.Tokens = append(current.Tokens, Token{Text: part, R: r, G: g, B: b})
 			}

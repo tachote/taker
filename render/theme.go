@@ -274,6 +274,33 @@ var Themes = map[string]*Theme{
 			HighlightBorder: redHighlight.border,
 		},
 	},
+	// The light theme exists for the medium, not for taste: reports and PDFs
+	// sit on white, and a dark screenshot printed on white reads as a hole in
+	// the page. The palette is GitHub's light canvas — code bg stays pure
+	// white so the pasted image borders itself.
+	"github-light": {
+		Name:   "GitHub Light",
+		Chroma: builtinStyle("github"),
+		UI: UIColors{
+			Bg:            rgb(0xff, 0xff, 0xff),
+			ChromeBg:      rgb(0xea, 0xec, 0xf0),
+			TabBarBg:      rgb(0xf6, 0xf8, 0xfa),
+			ActiveTab:     rgb(0xff, 0xff, 0xff),
+			TabBorder:     rgb(0xd0, 0xd7, 0xde),
+			TabAccent:     rgb(0x09, 0x69, 0xda),
+			TabText:       rgb(0x1f, 0x23, 0x28),
+			LineNumFg:     rgb(0x6e, 0x77, 0x81),
+			GutterSep:     rgb(0xd8, 0xde, 0xe4),
+			Splitter:      rgb(0xd0, 0xd7, 0xde),
+			SplitterShade: rgb(0xb6, 0xbe, 0xc5),
+			GapFg:         rgb(0x8c, 0x95, 0x9f),
+			GapBg:         rgb(0xf6, 0xf8, 0xfa),
+			// GitHub's diff-deleted pair: the wash is light enough that dark
+			// code text stays readable under it.
+			HighlightBg:     rgb(0xff, 0xeb, 0xe9),
+			HighlightBorder: rgb(0xcf, 0x22, 0x2e),
+		},
+	},
 	"nord": {
 		Name:   "Nord",
 		Chroma: builtinStyle("nord"),

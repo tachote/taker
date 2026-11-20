@@ -179,7 +179,8 @@ func TestHTTPIsAlwaysBurp(t *testing.T) {
 }
 
 var httpConfigFields = []string{
-	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "MaxMarks", "Caption",
+	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "MarkRe", "MaxMarks",
+	"Redact", "RedactRe", "RedactKeep", "RedactAsked", "Caption",
 	"RequestLines", "ResponseLines", "Context", "WrapWidth",
 	// An out-parameter, not a knob: the renderer writes what it drew into it so
 	// the machine-readable report and the image's own footnote cannot disagree.
@@ -240,7 +241,7 @@ func TestBurpColourMessage(t *testing.T) {
 		"Host: demo.testfire.net\n" +
 		"Set-Cookie: SID=68B9FA79D23F48A269262E622C58280D; Path=/; HttpOnly\n" +
 		"Set-Cookie: Data=0DAwMDAwZkNVcnBvcmF0ZXR4M; Path=/\n" +
-		"Content-Type: application/json\n" +
+		"Content-Type: application/x-www-form-urlencoded\n" +
 		"\n" +
 		"uid=admin&passw=x"
 	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
@@ -344,7 +345,7 @@ func TestBurpJSONFramingIsPlainText(t *testing.T) {
 		colourToken(`"test"`, burpString),
 		colourToken(",", burpLineColour),
 	}
-	got := burpBodyTokens(`    "user":"test",`, lexed)
+	got := burpBodyTokens(`    "user":"test",`, lexed, "application/json")
 	want := []highlight.Token{lexed[0], lexed[1], colourToken(":", burpBodyText), lexed[3], colourToken(",", burpBodyText)}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tokens, want %d", len(got), len(want))
@@ -386,6 +387,110 @@ func TestBurpColourLeavesJSONContentAlone(t *testing.T) {
 	// The header above it did get repainted, so the pass is not a no-op.
 	if got[1].Tokens[0].R != burpLineColour.R {
 		t.Errorf("header name was not repainted: %+v", got[1].Tokens)
+	}
+}
+
+// A json body whose strings hold "a=1&b=2" satisfies the form heuristic —
+// every &-field carries an '=' — but the declared Content-Type says json, and
+// Burp decides the body view by type, not by shape. Painting it as a form was
+// how a redirect URL inside a string ended up in param colours.
+func TestBurpColourJSONWithAmpersandsIsNotAForm(t *testing.T) {
+	msg := "HTTP/1.1 200 OK\nContent-Type: application/json; charset=utf-8\n\n" +
+		`{"url":"a=1&b=2","ok":true}`
+	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := burpColourMessage(lines)
+
+	for _, tok := range got[3].Tokens {
+		c := color.NRGBA{tok.R, tok.G, tok.B, 0xff}
+		if c == burpParamName || c == burpParamValue {
+			t.Errorf("token %q was painted as a form field — the json body was treated as a form", tok.Text)
+		}
+	}
+}
+
+// Without a declared Content-Type the body view falls back to the line's
+// shape — a bare "a=1&b=2" capture has no other signal, and Burp's param
+// colours are still the right read of it.
+func TestBurpColourNoContentTypeKeepsFormGuess(t *testing.T) {
+	msg := "POST /x HTTP/1.1\nHost: a.test\n\nuid=admin&passw=x"
+	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := burpColourMessage(lines)
+
+	var sawName bool
+	for _, tok := range got[3].Tokens {
+		if tok.Text == "uid" && (color.NRGBA{tok.R, tok.G, tok.B, 0xff}) == burpParamName {
+			sawName = true
+		}
+	}
+	if !sawName {
+		t.Errorf("body was not painted as a form: %+v", got[3].Tokens)
+	}
+}
+
+// A request line is only a request line inside the header block. In the body
+// — a nested request captured by an SSRF, a pasted log — "GET /x HTTP/1.1" is
+// text and must not be flattened to the single line colour.
+func TestBurpColourBodyLineThatLooksLikeARequest(t *testing.T) {
+	msg := "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nGET /internal HTTP/1.1"
+	lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := burpColourMessage(lines)
+
+	if len(got[3].Tokens) == 1 && got[3].Tokens[0].R == burpLineColour.R {
+		t.Errorf("body line was painted as a start line: %+v", got[3].Tokens)
+	}
+	// The real start line still gets the flat treatment.
+	if len(got[0].Tokens) != 1 || got[0].Tokens[0].R != burpLineColour.R {
+		t.Errorf("status line lost its colour: %+v", got[0].Tokens)
+	}
+}
+
+// A request Cookie carries several name=value pairs and Burp colours each
+// one; Set-Cookie carries one pair plus attributes, which stay plain.
+func TestBurpCookiePairsEachGetColours(t *testing.T) {
+	colours := func(msg string, line int) []color.NRGBA {
+		lines, err := highlight.Tokenize(msg, "http", "x.http", BurpStyle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := burpColourMessage(lines)
+		var out []color.NRGBA
+		for _, tok := range got[line].Tokens {
+			out = append(out, color.NRGBA{tok.R, tok.G, tok.B, 0xff})
+		}
+		return out
+	}
+	count := func(cs []color.NRGBA, c color.NRGBA) int {
+		n := 0
+		for _, x := range cs {
+			if x == c {
+				n++
+			}
+		}
+		return n
+	}
+
+	req := "GET / HTTP/1.1\nHost: a\nCookie: session=abc; csrftoken=xyz; theme=dark\n\n"
+	if got := count(colours(req, 2), burpParamName); got != 3 {
+		t.Errorf("cookie pairs: %d param names coloured, want 3", got)
+	}
+
+	res := "HTTP/1.1 200 OK\nSet-Cookie: session=abc; HttpOnly; SameSite=None\n\n"
+	cs := colours(res, 1)
+	if got := count(cs, burpParamName); got != 1 {
+		t.Errorf("set-cookie: %d param names coloured, want 1 (attributes stay plain)", got)
+	}
+	// SameSite=None must not slip into the pair colours.
+	if count(cs, burpParamValue) != 1 {
+		t.Errorf("set-cookie attributes picked up param colours: %v", cs)
 	}
 }
 
@@ -431,5 +536,84 @@ func TestRenderHTTPReportsWhatItDrew(t *testing.T) {
 	// extent has to say the view is the whole message, not that it is empty.
 	if facts.Request.Shown != facts.Request.Total || facts.Request.Shown == 0 {
 		t.Errorf("request extent = %+v, want the whole untrimmed message", facts.Request)
+	}
+}
+
+// A single-side render produces one panel — a data-leak finding is the
+// response alone, and the splitter would frame a pane that does not exist.
+func TestHTTPSingleSide(t *testing.T) {
+	facts := &HTTPFacts{}
+	img, err := RenderHTTP(&HTTPConfig{Request: testReq, Facts: facts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !facts.Request.Present || facts.Response.Present {
+		t.Fatalf("present = req:%v res:%v, want req only", facts.Request.Present, facts.Response.Present)
+	}
+	pair, err := RenderHTTP(&HTTPConfig{Request: testReq, Response: testRes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Bounds().Dx() >= pair.Bounds().Dx() {
+		t.Errorf("single panel %dpx >= pair %dpx; it is framing an absent pane",
+			img.Bounds().Dx(), pair.Bounds().Dx())
+	}
+
+	facts2 := &HTTPFacts{}
+	if _, err := RenderHTTP(&HTTPConfig{Response: testRes, Facts: facts2}); err != nil {
+		t.Fatal(err)
+	}
+	if facts2.Request.Present || !facts2.Response.Present {
+		t.Errorf("response-only present = req:%v res:%v", facts2.Request.Present, facts2.Response.Present)
+	}
+}
+
+// An empty config renders nothing — guarding against a blank PNG at exit 0.
+func TestHTTPEmptyConfigFails(t *testing.T) {
+	if _, err := RenderHTTP(&HTTPConfig{}); err == nil {
+		t.Fatal("empty request and response should refuse, not draw a blank pane")
+	}
+}
+
+// A trim that drops line 1 drops the line naming where the message went: the
+// crop note counts lines, this warning says what specifically is missing.
+func TestHTTPStartLineWarning(t *testing.T) {
+	spec, err := highlight.ParseLineSpec("3-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var warned []string
+	_, err = RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RequestLines: spec,
+		Warn:         func(m string) { warned = append(warned, m) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range warned {
+		if strings.Contains(w, "request line") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no request-line warning in %v", warned)
+	}
+}
+
+// --redact on HTTP hides the literal in whichever panel holds it and declares
+// the count the report will carry.
+func TestHTTPRedact(t *testing.T) {
+	facts := &HTTPFacts{}
+	_, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		Redact: []string{"abc"}, Facts: facts,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if facts.Redacted == 0 {
+		t.Error("no redaction box drawn for a literal in the capture")
 	}
 }

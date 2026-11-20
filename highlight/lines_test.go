@@ -2,6 +2,7 @@ package highlight
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -117,6 +118,23 @@ func TestTokenizeTrailingNewline(t *testing.T) {
 		if len(lines) != c.want {
 			t.Errorf("Tokenize(%q) = %d lines, want %d", c.src, len(lines), c.want)
 		}
+	}
+}
+
+// A CRLF capture is what a real HTTP message looks like on disk. The \r is not
+// content: drawn it is a blank glyph, counted it is a phantom column.
+func TestTokenizeStripsCR(t *testing.T) {
+	lines, err := Tokenize("GET /x HTTP/1.1\r\nHost: a.test\r\n\r\na=1\r\n", "text", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, lt := range lines {
+		if strings.Contains(lt.Text(), "\r") {
+			t.Errorf("line %d still carries a carriage return: %q", i+1, lt.Text())
+		}
+	}
+	if got := lines[1].Text(); got != "Host: a.test" {
+		t.Errorf("line 2 = %q, want the header text without the CR", got)
 	}
 }
 

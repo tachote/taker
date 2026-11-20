@@ -66,7 +66,7 @@ func TestReadGitBlob(t *testing.T) {
 		t.Errorf("rev = %q, want the short commit on its own", origin.Rev)
 	}
 
-	for _, spec := range []string{"HEAD", "src/auth.py", ":src/auth.py", "HEAD:", "HEAD:no/such.go", "nope:src/auth.py"} {
+	for _, spec := range []string{"HEAD", "src/auth.py", ":src/auth.py", "HEAD:", "HEAD:no/such.go", "nope:src/auth.py", "--output=/tmp/x:src/auth.py"} {
 		if _, _, err := readGitBlobIn(dir, spec); err == nil {
 			t.Errorf("%q was accepted; it should fail", spec)
 		} else if !strings.Contains(err.Error(), "--git") {

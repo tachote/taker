@@ -513,6 +513,118 @@ func TestWarnsWhenOnlySomeMarksAreInView(t *testing.T) {
 	}
 }
 
+// The window chrome adds a title band above the tab bar. The only check that
+// matters is the band's presence and its dots: an empty strip of chrome is a
+// regression the eye misses but the pixels do not.
+func TestWindowChromeAddsTitleBand(t *testing.T) {
+	lines, err := highlight.Tokenize("x = 1\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bare, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	win, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, WindowChrome: true, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if win.Bounds().Dy() != bare.Bounds().Dy()+windowBarH {
+		t.Errorf("window chrome added %dpx, want %d", win.Bounds().Dy()-bare.Bounds().Dy(), windowBarH)
+	}
+	// The first traffic-light dot must be drawn inside the band.
+	want := rgb(0xff, 0x5f, 0x57)
+	got := win.NRGBAAt(chromeMargin+windowDotInset+windowDotR, chromeMargin+windowBarH/2)
+	if got != want {
+		t.Errorf("first dot = %v, want %v", got, want)
+	}
+}
+
+// The shadow lives in the chrome margin: the band below the window must hold
+// pixels darker than the canvas.
+func TestShadowDarkensTheMargin(t *testing.T) {
+	lines, err := highlight.Tokenize("x = 1\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, Shadow: true, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := DefaultTheme.UI
+	w := img.Bounds().Dx()
+	y := img.Bounds().Dy() - chromeMargin + shadowOffsetY + shadowSpread/2
+	found := false
+	for x := chromeMargin; x < w-chromeMargin; x++ {
+		p := img.NRGBAAt(x, y)
+		if p != ui.ChromeBg {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("no shadow pixels below the window")
+	}
+}
+
+// A mark border's corner pixel must be background, not border colour: the
+// stroke now rounds with the window instead of ending in a square point.
+func TestMarkBorderRoundsItsCorners(t *testing.T) {
+	src := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+	lines, err := highlight.Tokenize(src, "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := Render(&Config{
+		Lines: lines, Title: "t", Theme: DefaultTheme,
+		HighlightLines: highlight.Marks{1: {{Start: 2, End: 10}}},
+		noWarn:         true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := DefaultTheme.UI
+	// The box's top-left corner is (min x, min y) over all border pixels. A
+	// square stroke paints that pixel fully; a rounded one leaves it a blend
+	// or the mark's own wash.
+	x1, y1 := -1, -1
+	for y := 0; y < img.Bounds().Dy(); y++ {
+		for x := 0; x < img.Bounds().Dx(); x++ {
+			if img.NRGBAAt(x, y) == ui.HighlightBorder {
+				if y1 == -1 || y < y1 {
+					y1 = y
+				}
+				if x1 == -1 || x < x1 {
+					x1 = x
+				}
+			}
+		}
+	}
+	if x1 == -1 {
+		t.Fatal("no mark border found")
+	}
+	if img.NRGBAAt(x1, y1) == ui.HighlightBorder {
+		t.Error("corner pixel is full border colour: the stroke is still square")
+	}
+}
+
+// The light theme must be visibly light — the one property a regression can
+// silently flip is the editor background.
+func TestGitHubLightIsActuallyLight(t *testing.T) {
+	lines, err := highlight.Tokenize("x = 1\n", "text", "", Themes["github-light"].Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := Render(&Config{Lines: lines, Title: "t", Theme: Themes["github-light"], noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bg := img.NRGBAAt(img.Bounds().Dx()/2, chromeMargin+tabBarHeight+10)
+	if bg.R < 200 || bg.G < 200 || bg.B < 200 {
+		t.Errorf("github-light editor bg = %v, want near-white", bg)
+	}
+}
+
 func TestCompressRanges(t *testing.T) {
 	cases := []struct {
 		in   []int
@@ -526,5 +638,86 @@ func TestCompressRanges(t *testing.T) {
 		if got := compressRanges(c.in); got != c.want {
 			t.Errorf("compressRanges(%v) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+// --redact hides the text under a solid box — black on every theme, counted
+// on the Config so the report and the footnote agree with the image.
+func TestRedactDrawsBlackBoxes(t *testing.T) {
+	lines, err := highlight.Tokenize("key = \"hunter2\"\nplain = 1\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redact, _ := highlight.FindMarks([][]highlight.LineTokens{lines}, []string{"hunter2"}, 0)
+	cfg := &Config{Lines: lines, Title: "t", Theme: DefaultTheme, RedactRegions: redact[0], noWarn: true}
+	img, err := Render(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Redacted != 1 {
+		t.Fatalf("Redacted = %d, want 1", cfg.Redacted)
+	}
+	// vscode-dark's background is #1e1e1e, never pure black — a pure-black run
+	// can only be the redaction box.
+	black := 0
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			c := img.NRGBAAt(x, y)
+			if c.R == 0 && c.G == 0 && c.B == 0 && c.A == 0xff {
+				black++
+			}
+		}
+	}
+	if black < 50 {
+		t.Errorf("only %d pure-black pixels; the redaction box is not drawn", black)
+	}
+}
+
+// --redact-keep leaves the first characters visible: the box shrinks to the
+// rest, and a span shorter than the keep draws nothing at all.
+func TestRedactKeepLeavesPrefixVisible(t *testing.T) {
+	lines, err := highlight.Tokenize("key = \"hunter2\"\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redact, _ := highlight.FindMarks([][]highlight.LineTokens{lines}, []string{"hunter2"}, 0)
+	cfg := &Config{Lines: lines, Title: "t", Theme: DefaultTheme,
+		RedactRegions: highlight.KeepSpans(redact[0], 4), noWarn: true}
+	if _, err := Render(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Redacted != 1 {
+		t.Fatalf("Redacted = %d, want 1 (the suffix stays hidden)", cfg.Redacted)
+	}
+
+	cfg2 := &Config{Lines: lines, Title: "t", Theme: DefaultTheme,
+		RedactRegions: highlight.KeepSpans(redact[0], 7), noWarn: true}
+	if _, err := Render(cfg2); err != nil {
+		t.Fatal(err)
+	}
+	if cfg2.Redacted != 0 {
+		t.Errorf("Redacted = %d, want 0 when the keep covers the whole secret", cfg2.Redacted)
+	}
+}
+
+// Terminal mode has no source lines to number: the gutter disappears and the
+// image is narrower than the same content rendered as code.
+func TestTerminalDropsTheGutter(t *testing.T) {
+	lines, err := highlight.Tokenize("$ id\nuid=0(root)\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	term, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, Terminal: true, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if term.Bounds().Dx() >= code.Bounds().Dx() {
+		t.Errorf("terminal width %d >= code width %d; the gutter was not dropped",
+			term.Bounds().Dx(), code.Bounds().Dx())
 	}
 }
