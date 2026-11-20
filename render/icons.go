@@ -56,7 +56,7 @@ var defaultIcon = fileIcon{gFile, cGeneric}
 // iconByExt is keyed on a lowercased extension without its dot.
 var iconByExt = map[string]fileIcon{
 	// ── Systems ──────────────────────────────────────────────────────────
-	"go":    {'\ue627', rgb(0x00, 0xad, 0xd8)}, // gopher
+	"go":    {0xf07d3, rgb(0x00, 0xad, 0xd8)},  // nf-md-language_go wordmark
 	"rs":    {'\ue7a8', rgb(0xde, 0x80, 0x27)}, // rust gear
 	"zig":   {'\ue6a9', rgb(0xf7, 0xa4, 0x1d)},
 	"c":     {'\ue649', rgb(0x00, 0x5f, 0x87)},
@@ -162,8 +162,8 @@ var iconByExt = map[string]fileIcon{
 	"jsp":        {'\ue738', rgb(0xb0, 0x70, 0x19)},
 	"aspx":       {'\ue77f', rgb(0x51, 0x8c, 0xff)},
 	"cshtml":     {'\ue77f', rgb(0x51, 0x8c, 0xff)},
-	"gohtml":     {'\ue627', rgb(0x00, 0xad, 0xd8)},
-	"gotmpl":     {'\ue627', rgb(0x00, 0xad, 0xd8)},
+	"gohtml":     {0xf07d3, rgb(0x00, 0xad, 0xd8)},
+	"gotmpl":     {0xf07d3, rgb(0x00, 0xad, 0xd8)},
 
 	// ── Shell ────────────────────────────────────────────────────────────
 	"sh":   {'\ue795', cShell},
@@ -303,6 +303,9 @@ var iconByExt = map[string]fileIcon{
 
 // iconByName covers files whose identity is the whole name, not an extension.
 var iconByName = map[string]fileIcon{
+	// Terminal evidence (`taker exec`, `taker term`)
+	"terminal": {'\uea85', cShell},
+
 	// Containers
 	"dockerfile":          {'\ue650', rgb(0x24, 0x96, 0xed)},
 	"containerfile":       {'\ue650', rgb(0x24, 0x96, 0xed)},
@@ -324,8 +327,8 @@ var iconByName = map[string]fileIcon{
 	"procfile":       {gGear, rgb(0x79, 0x58, 0x9f)},
 
 	// Manifests
-	"go.mod":            {'\ue627', rgb(0x00, 0xad, 0xd8)},
-	"go.sum":            {'\ue627', rgb(0x00, 0xad, 0xd8)},
+	"go.mod":            {0xf07d3, rgb(0x00, 0xad, 0xd8)},
+	"go.sum":            {0xf07d3, rgb(0x00, 0xad, 0xd8)},
 	"package.json":      {'\ue71e', rgb(0xcb, 0x34, 0x37)}, // npm
 	"package-lock.json": {'\ue71e', rgb(0xcb, 0x34, 0x37)},
 	"yarn.lock":         {'\ue71e', rgb(0x2c, 0x8e, 0xbb)},

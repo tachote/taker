@@ -48,14 +48,19 @@ go build -o taker .
 
 - **VS Code Dark+ aesthetics** — window chrome with rounded corners, tab bar, gutter, syntax highlighting
 - **Brand-colored file icons** — 260+ extensions and filenames (`Dockerfile`, `go.mod`, `.env`, `pom.xml`), each a real Nerd Fonts logo in its language color
-- **10 built-in themes** — VS Code Dark+, Dracula, Nord, Catppuccin Mocha, GitHub Dark, Gruvbox, One Dark, Monokai, Solarized Dark, Rosé Pine
+- **11 built-in themes** — VS Code Dark+, Dracula, Nord, Catppuccin Mocha, GitHub Dark, GitHub Light, Gruvbox, One Dark, Monokai, Solarized Dark, Rosé Pine
+- **Window chrome and shadow** — `--chrome window` adds a title bar with traffic lights and the file name centred; `--shadow` lifts the pane off the canvas
 - **Line selection** — render only the lines you need (`1,5,10-20,30-40`), with gap bands stating how many lines were skipped
 - **Context mode** — automatically include N lines around highlighted lines (`--context 5`)
-- **Point at the finding, not the line** — mark a column range (`-H "7:63-85"`) or, better, paste the value itself (`-m "sk_live_4xT9mK2pQrN8vW1"`) and let `taker` locate every occurrence
+- **Point at the finding, not the line** — mark a column range (`-H "7:63-85"`), paste the value itself (`-m "sk_live_4xT9mK2pQrN8vW1"`), or match a shape (`--mark-re "eyJ[A-Za-z0-9_-]+"`)
+- **Redaction that declares itself** — `--redact` hides secrets under a black box and the footnote says how many regions were masked; `--redact-keep 4` leaves `sk_l…████` legible. Redact literals are scrubbed from the report's `command` and the PNG's metadata too — a hidden value never travels verbatim in the same file's provenance
 - **Captions** — `-L` adds a strip stating what the image proves, drawn outside the window so it never reads as something the tool under test printed
 - **Word wrap** — wrap long lines with continuation indicators; wraps automatically rather than cropping
-- **HTTP evidence mode** — side-by-side Request / Response pane that mimics Burp Suite's message editor, so evidence reads like a Burp screenshot
-- **Stdin support** — pipe code directly without creating a temp file
+- **HTTP evidence mode** — side-by-side Request / Response pane that mimics Burp Suite's message editor, so evidence reads like a Burp screenshot; also single-panel (`-r` or `-s` alone) and combined captures (`-f`, Burp "Save item" format)
+- **Terminal evidence mode** — `taker exec -- id` runs a command and renders the prompt plus output under a terminal window; `taker term` renders a saved transcript
+- **Provenance built in** — every PNG embeds the command line, timestamp, version and input SHA-256 as `tEXt` chunks; `--json` reports the same fields
+- **Preflight for agents** — `--dry-run` validates the whole render and reports the image's dimensions without writing it
+- **Stdin support** — pipe code directly without creating a temp file; if nothing arrives on stdin within 300ms it fails as `usage` instead of hanging on an empty pipe
 - **Self-contained binary** — JetBrains Mono and Symbols Nerd Font are embedded; no runtime dependencies
 
 ---
@@ -74,18 +79,27 @@ taker [file] [flags]
 | `--lines` | `-n` | all | Lines to include, e.g. `1,5,10-20` |
 | `--first-line` | | 1 | Line number of the input's first line (use it when piping an excerpt) |
 | `--git` | | — | Render `<rev>:<path>` out of the repository, e.g. `HEAD:src/auth/login.py` |
+| `--repo-dir` | | `.` | Repository directory for `--git` |
 | `--highlight` | `-H` | — | Regions to highlight in red: `15`, `13,15`, `10-20`, or `15:20-45` for columns |
 | `--mark` | `-m` | — | Highlight every occurrence of this text. Repeatable |
+| `--mark-re` | | — | Highlight every regex match. Repeatable |
 | `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal, earliest first |
+| `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable |
+| `--redact-re` | | — | Hide every regex match under a black box. Repeatable |
+| `--redact-keep` | | 0 | Leave the first N characters of each `--redact` match visible (`4` → `sk_l…████`) |
 | `--label` | `-L` | — | Caption stating what the image proves |
 | `--context` | `-c` | 0 | Include N context lines around each highlighted line |
 | `--wrap` | `-w` | false | Wrap long lines at a column boundary |
 | `--wrap-width` | | 100 | Column width when wrapping (implies `--wrap`; floor 20) |
 | `--title` | `-t` | file path | Title shown in the tab bar |
 | `--theme` | `-T` | `vscode-dark` | Color theme |
+| `--chrome` | | `editor` | Window style: `editor` (bare pane) or `window` (title bar + traffic lights) |
+| `--shadow` | | false | Drop shadow under the window |
 | `--output` | `-o` | `output.png` | Output PNG path |
+| `--dry-run` | | | Validate and report without writing the PNG |
 | `--list-themes` | | | Print available themes and exit |
 | `--json` | | | Write a machine-readable report to stdout. Human messages stay on stderr |
+| `--toon` | | | Same document in TOON — typically ~25-40% fewer tokens for agents |
 
 #### Examples
 
@@ -101,6 +115,13 @@ taker auth.py -m "sk_live_4xT9mK2pQrN8vW1" -o evidence.png
 
 # Or give the columns explicitly
 taker auth.py -H "42:18-41" -o evidence.png
+
+# Hide a live secret but keep the image honest: the box says where it was and
+# the footnote declares the count
+taker auth.py --redact "sk_live_4xT9mK2pQrN8vW1" --redact-keep 6 -o evidence.png
+
+# Mark a pattern — every bearer-shaped token, not one pasted literal
+taker auth.py --mark-re "Bearer [A-Za-z0-9_.-]+" -o evidence.png
 
 # Caption it so the image explains itself in the report
 taker auth.py -m "sk_live_4xT9mK2pQrN8vW1" \
@@ -159,7 +180,7 @@ taker render/theme.go -n "1-32" -m "ChromeBg" -T catppuccin-mocha -o evidence.pn
 ### HTTP evidence
 
 ```
-taker http -r <request-file> -s <response-file> [flags]
+taker http [-r <request-file>] [-s <response-file>] | -f <capture-file> [flags]
 ```
 
 Renders a side-by-side Request / Response pane built to look like Burp Suite's message editor: title strip, `Pretty | Raw | Hex` view tabs with the active one underlined, dense line spacing, a gutter with no rule, and wrapped rows left unnumbered the way Burp does it. Headers are near-monochrome with only the JSON body colored, matching Burp's Pretty view.
@@ -168,27 +189,46 @@ Renders a side-by-side Request / Response pane built to look like Burp Suite's m
 |------|-------------|
 | `-r` | File containing the raw HTTP request |
 | `-s` | File containing the raw HTTP response |
+| `-f` | One file holding request **and** response (Burp "Save item"); `-r`/`-s` take precedence |
 | `--hr` | Regions to highlight in the request: `8-9`, or `8:20-45` for columns |
 | `--hs` | Regions to highlight in the response: `4`, or `4:12-60` for columns |
 | `--mark` / `-m` | Highlight every occurrence of this text in either panel. Repeatable |
+| `--mark-re` | Highlight every regex match in either panel. Repeatable |
 | `--max-marks` | Keep at most N matches per `--mark` literal, earliest first |
+| `--redact` | Hide every occurrence of this text under a black box. Repeatable |
+| `--redact-re` | Hide every regex match under a black box. Repeatable |
+| `--redact-keep` | Leave the first N characters of each `--redact` match visible |
 | `--label` / `-L` | Caption stating what the image proves |
 | `--nr` | Lines to include from the request, e.g. `1-20` |
 | `--ns` | Lines to include from the response, e.g. `1-30` |
 | `-c` | Include N context lines around each highlighted line |
 | `--wrap-width` | Columns per panel (default: 90) |
 | `-o` | Output PNG path |
+| `--dry-run` | Validate and report without writing the PNG |
 | `--json` | Machine-readable report on stdout; human messages stay on stderr |
+| `--toon` | Same document in TOON — typically ~25-40% fewer tokens for agents |
 
 There is no `-T` here. HTTP evidence always renders in the Burp palette: a reader recognises a proxy capture at a glance, and a Dracula-tinted pane labelled *Request / Response / Pretty / Raw / Hex* is a screenshot of an application that does not exist.
 
 `-c` only applies to a panel that has highlights, so a response-only finding still renders its request in full.
+
+`-r` or `-s` may be given alone — a data leak is often the response by itself — and then the pane drops to a single panel with no splitter. `-f` reads one capture the way Burp's "Save item" writes it: request first, split on the response status line; a file that is not HTTP at all is an input error, and one with no response section renders the request with a warning. A trim or context crop that leaves out the request line (`POST /x HTTP/1.1`) or the response status line emits a warning, because that line names where the message went — the surface of the finding.
 
 #### Examples
 
 ```bash
 # Basic HTTP evidence
 taker http -r request.http -s response.http -o evidence.png
+
+# One Burp "Save item" file — no manual split into request/response
+taker http -f capture.http -m "sessionid=42" -o evidence.png
+
+# Response-only evidence (data leak)
+taker http -s response.http --hs 7 -o evidence.png
+
+# Mask the live bearer token in both panels; the footnote declares the count
+taker http -r request.http -s response.http \
+  --redact-re "eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+" -o evidence.png
 
 # Highlight the credential leak line in request and the token in response
 taker http -r request.http -s response.http --hr "7" --hs "7" -o evidence.png
@@ -234,6 +274,40 @@ Content-Type: application/json
 {"access_token": "eyJ..."}
 ```
 
+### Terminal evidence
+
+```
+taker exec -- <command> [args...] [flags]
+taker exec --sh '<pipeline>' [flags]
+taker term <transcript-file> [flags]
+```
+
+The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. The exit status lands in the footnote (`exit 0`, `exit 1`, `timed out after Ns`), so a non-zero result is documented, not hidden.
+
+| Flag | Description |
+|------|-------------|
+| `--sh` | Run the string through `sh -c` instead of exec'ing argv (mutually exclusive with a positional command) |
+| `--timeout` | Kill the command after this many seconds (default: none) |
+| `--lines` / `-n` | Lines of the transcript to include |
+| `--wrap-width` | Terminal width in columns (default: 80) |
+| `-m` / `--mark` / `--mark-re` | Highlight literals / regex matches in the output |
+| `--redact` / `--redact-re` / `--redact-keep` | Mask output the same way as code evidence |
+| `-L` | Caption stating what the image proves |
+| `-T` | Color theme |
+| `-o` | Output PNG path |
+| `--json` | Machine-readable report on stdout |
+| `--toon` | Same document in TOON — typically ~25-40% fewer tokens for agents |
+
+```bash
+# Run the proof command and keep its output, exit code included
+taker exec -- id -o rce.png
+taker exec --sh 'curl -s http://internal:8080/actuator/env | head' -o ssrf.png
+taker exec --timeout 5 -- nc -nv 10.0.0.9 443 -o port-open.png
+
+# Render a transcript captured during the test window
+taker term ./loot/nmap-scan.txt -m "open" -o ports.png
+```
+
 ---
 
 ## Fidelity to Burp
@@ -269,6 +343,7 @@ taker --list-themes
 | `nord` | Nord |
 | `catppuccin-mocha` | Catppuccin Mocha |
 | `github-dark` | GitHub Dark |
+| `github-light` | GitHub Light — for reports and PDFs that sit on white |
 | `gruvbox` | Gruvbox |
 | `one-dark` | One Dark |
 | `monokai` | Monokai |
@@ -277,11 +352,49 @@ taker --list-themes
 
 ---
 
-## Machine-readable report (`--json`)
+## Machine-readable report (`--json` / `--toon`)
 
 An agent or a pipeline should not have to read the messages a human reads. With
 `--json`, **stdout carries one JSON document** describing the run, while stderr
-keeps the human lines; without it, stdout stays empty and nothing else changes.
+keeps the human lines. `--toon` writes the same document in
+[TOON](https://toonformat.dev/) — identical information, typically 25-40% fewer tokens for
+an agent to read:
+
+```console
+$ taker snap src/auth.py -m os.system -c 5 --toon -o auth.png
+```
+```
+tool: taker
+version: 0.2.0
+mode: snap
+ok: true
+exit: 0
+command: "taker snap src/auth.py -m os.system -c 5 --toon -o auth.png"
+generated: "2026-04-12T18:02:11Z"
+output: /abs/path/auth.png
+bytes: 16099
+width: 573
+height: 293
+source:
+  kind: file
+  path: src/auth.py
+crop:
+  first: 66
+  last: 76
+  shown: 11
+  total: 120
+marks[1]{needle,matches,lines,kept,dropped}:
+  os.system,1,1,1,0
+sha256[1]{name,sum}:
+  source,b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+warnings[0]:
+```
+
+Without either flag a **successful** run leaves stdout empty — the PNG is the
+artifact. A **failed** run always writes a document in the TOON shape above
+(`ok: false`, `exit`, `error.kind`, `error.message`), so a caller that never
+passed a format flag still gets something it can classify instead of grepping
+stderr prose.
 
 ```console
 $ taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png
@@ -293,6 +406,8 @@ $ taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png
   "mode": "snap",
   "ok": true,
   "exit": 0,
+  "command": "taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png",
+  "generated": "2026-04-12T18:02:11Z",
   "output": "/abs/path/auth.png",
   "bytes": 16099,
   "width": 573,
@@ -300,9 +415,17 @@ $ taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png
   "source": { "kind": "file", "path": "src/auth.py" },
   "crop": { "first": 70, "last": 71, "shown": 2, "total": null },
   "marks": [ { "needle": "os.system", "matches": 1, "lines": 1, "kept": 1, "dropped": 0 } ],
+  "sha256": [ { "name": "source", "sha256": "b94d…" } ],
+  "redactions": 0,
+  "dry_run": false,
   "warnings": []
 }
 ```
+
+The report echoes `--mark`/`--mark-re` needles verbatim — they are instructions
+to circle, not secrets — while `--redact` literals are masked everywhere,
+including inside `warnings[]` and `command`. Do not pass a mark you would not
+want recorded.
 
 A run that fails says so in the same document, so a consumer never has to branch
 on "did anything come out of stdout":
@@ -319,11 +442,28 @@ on "did anything come out of stdout":
 `height` and `bytes` are read back off the PNG. `crop` is the extent the image
 shows, in the source's own numbering, and its `total` is `null` when the input did
 not start at line 1 — an excerpt's real length is not something taker knows, and a
-wrong total is worse than none. `panels` carries one `crop` per pane for
-`taker http`. `marks` reports, per literal, how many matches were boxed (`kept`)
-and how many a limit left out (`dropped`). `warnings` holds the same caveats the
-terminal shows — a mark that landed outside the view, a character the font cannot
-draw, a clamped width — so they survive a consumer that never reads stderr.
+wrong total is worse than none. `panels` carries one `crop` per pane that exists
+in `taker http` — an absent pane is `null`, not a zero crop. `marks` reports, per
+literal or pattern, how many matches were boxed (`kept`) and how many a limit left
+out (`dropped`). `sha256` fingerprints every input that fed the image (`source`,
+`request`, `response`, `transcript`), and `command`/`generated` record the exact
+invocation and its UTC time — the same provenance the PNG itself embeds as `tEXt`
+chunks (`taker:sha256`, `taker:command`, `taker:generated`, `taker:version`), so an
+image that travels without the report still describes itself — with one
+exception: every `--redact` literal is replaced by `<redacted>` in `command`
+and in the PNG chunks, because a masked value must not leak through
+provenance. `redactions` counts
+the black boxes the footnote declares. For `taker exec`, `exec` carries the
+child command's outcome (`exit`, `timed_out`) — taker's own `exit` says the
+evidence was produced, `exec.exit` says what the command answered. `warnings`
+holds the same caveats the
+terminal shows — a mark that landed outside the view, a redaction that matched
+nothing, a trim that cut the request line — so they survive a consumer that never
+reads stderr. `--dry-run` runs the whole pipeline and reports the same document
+with `dry_run: true` and no `output`, for a preflight that never writes.
+`help` carries the next command that unblocks or completes the run — widen the
+trim, fix the flag, rerun without `--dry-run` — so a consumer never has to
+parse a manual to recover.
 
 `--list-themes --json` reports the palettes as data too, with `httpOnly` marking
 the ones `taker snap` refuses.
@@ -341,8 +481,11 @@ The code is part of the contract: it says what to fix without parsing a word.
 | `4` | A documented limit refused the render: past 32000px tall, nothing matched |
 
 Failures are reported on **both** channels: the code, the human line on stderr,
-and — with `--json` — a document carrying `error.kind` (`usage`, `input`,
-`refused`, `output`) and the message. A failed run never writes an image.
+and a document on stdout carrying `error.kind` (`usage`, `input`, `refused`,
+`output`), the message and any `help` hints — in the requested format with
+`--json`/`--toon`, in TOON without a flag. Parse errors get the same treatment:
+`taker http --bogus` exits 2 with `error.kind: usage` on stdout, not just a
+usage dump on stderr. A failed run never writes an image.
 
 ## Behavior
 

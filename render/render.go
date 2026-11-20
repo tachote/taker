@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf8"
 
@@ -60,13 +61,38 @@ const (
 	// image stops being readable as a screenshot even though it still loads.
 	maxImageHeight  = 32000
 	warnImageHeight = 8000
-	iconSizePt      = 9.0
+	iconSizePt      = 11.0
 	uiSizePt        = 10.0 // panel titles and tabs: UI text is smaller than code
 	defaultWrapCols = 100
 	minContentChars = 20
 	chromeMargin    = 28
 	chromeRadius    = 10
 	chromeBorderW   = 1
+
+	// Mark boxes get the window's own corner language at a smaller radius:
+	// square strokes against a rounded window read as a different renderer.
+	markCornerR = 4
+
+	// The window chrome: a title band over the editor pane, macOS style —
+	// three dots and the file name centred. It is the look a reader associates
+	// with a screenshot taken for a report rather than an editor crop.
+	windowBarH     = 46
+	windowDotR     = 6
+	windowDotGap   = 9
+	windowDotInset = 22
+	windowTitlePad = 60 // room kept on each side of the centred title for the dots
+
+	// The drop shadow sits in the chrome margin: a soft falloff under the
+	// window, offset down so the lift reads as light coming from above.
+	shadowSpread  = 9
+	shadowOffsetY = 7
+	shadowAlpha   = 0.34
+)
+
+const (
+	tabCloseGap = 10 // space between the title and the close glyph in the tab
+	// gClose is nf-fa-close: the × a VS Code tab shows on its trailing edge.
+	gClose = '\uf00d'
 )
 
 // Config holds all parameters for a single render pass.
@@ -89,12 +115,33 @@ type Config struct {
 	// and a screenshot that does not name its revision cannot be checked at all.
 	SourceRef string
 
+	// WindowChrome draws a title band with traffic-light dots above the tab
+	// bar, turning the editor pane into a window. Snap only.
+	WindowChrome bool
+	// Shadow lifts the window off the canvas with a soft drop shadow.
+	Shadow bool
+
 	// Warn, when set, receives the warnings this render produces — a cropped view
 	// that lost marks, a character the font cannot draw, an image taller than a
 	// viewer opens. The CLI routes them into its machine-readable report so a
 	// consumer sees the same caveats the analyst sees; left nil they go to
 	// stderr, which is what a caller rendering for its own eyes wants.
 	Warn func(msg string)
+
+	// RedactRegions are column spans covered by a solid box: the secret stays
+	// out of the image while the box and the footnote say where it was. A
+	// redaction is a hiding, not a highlighting — it is drawn over marks.
+	RedactRegions highlight.Marks
+	// RedactAsked means the caller requested masking; when the render then
+	// redacts nothing, the footnote says so — "0 regions redacted" — instead
+	// of letting the image pass for a clean capture.
+	RedactAsked bool
+	// Terminal drops the line-number gutter and the wrap arrow: a transcript
+	// has no source lines to number.
+	Terminal bool
+	// Redacted is set by Render — how many boxes were drawn, so the footnote
+	// and the machine report can declare the masking the image shows.
+	Redacted int
 
 	httpTabs []burpTab // view strip for an HTTP panel
 
@@ -185,17 +232,24 @@ func splitTokensAt(tokens []highlight.Token, cols int) [][]highlight.Token {
 
 // metrics holds the font faces and derived pixel sizes. Independent of content.
 type metrics struct {
-	face       font.Face
-	uiFace     font.Face // panel chrome (titles, tabs) — smaller than the code face
-	iconFace   font.Face
-	charWidth  int
-	ascent     int
-	descent    int
-	uiAscent   int
-	uiDescent  int
-	iconAscent int
-	iconW      int
+	face        font.Face
+	uiFace      font.Face // panel chrome (titles, tabs) — smaller than the code face
+	iconFace    font.Face
+	charWidth   int
+	ascent      int
+	descent     int
+	uiAscent    int
+	uiDescent   int
+	iconAscent  int
+	iconDescent int
+	iconW       int
 }
+
+// loadMetrics is the parse; metricsFor is the cache. The three faces come out
+// of embedded TTFs on every call, and one HTTP render asks for them up to five
+// times (two panels, two height re-renders, the caption). The metrics are
+// content-independent, so one parse serves every render in the process.
+var metricsFor = sync.OnceValues(loadMetrics)
 
 func loadMetrics() (*metrics, error) {
 	face, err := customfont.LoadFace(fontSizePt, fontDPI)
@@ -212,7 +266,7 @@ func loadMetrics() (*metrics, error) {
 	}
 
 	iconMetrics := iconFace.Metrics()
-	iconAdv, ok := iconFace.GlyphAdvance('\ue627')
+	iconAdv, ok := iconFace.GlyphAdvance(0xf07d3)
 	if !ok {
 		iconAdv = fixed.I(14)
 	}
@@ -229,16 +283,17 @@ func loadMetrics() (*metrics, error) {
 	uiM := uiFace.Metrics()
 
 	return &metrics{
-		face:       face,
-		uiFace:     uiFace,
-		iconFace:   iconFace,
-		charWidth:  int(adv >> 6),
-		ascent:     ascent,
-		descent:    descent,
-		uiAscent:   int(uiM.Ascent >> 6),
-		uiDescent:  int(uiM.Descent >> 6),
-		iconAscent: int(iconMetrics.Ascent >> 6),
-		iconW:      int(iconAdv >> 6),
+		face:        face,
+		uiFace:      uiFace,
+		iconFace:    iconFace,
+		charWidth:   int(adv >> 6),
+		ascent:      ascent,
+		descent:     descent,
+		uiAscent:    int(uiM.Ascent >> 6),
+		uiDescent:   int(uiM.Descent >> 6),
+		iconAscent:  int(iconMetrics.Ascent >> 6),
+		iconDescent: int(iconMetrics.Descent >> 6),
+		iconW:       int(iconAdv >> 6),
 	}, nil
 }
 
@@ -251,6 +306,12 @@ func (m *metrics) baselineIn(y, height int) int {
 // baselineUI is baselineIn for the smaller chrome face.
 func (m *metrics) baselineUI(y, height int) int {
 	return y + (height-(m.uiAscent+m.uiDescent))/2 + m.uiAscent
+}
+
+// baselineIcon centers the icon face's line box in a band. Ascent alone
+// misplaces glyphs with deep bearings — the close × rode visibly high.
+func (m *metrics) baselineIcon(y, height int) int {
+	return y + (height-(m.iconAscent+m.iconDescent))/2 + m.iconAscent
 }
 
 type layout struct {
@@ -394,7 +455,8 @@ func headerWidth(m *metrics, cfg *Config) int {
 		// Keep the tabs and the control strip from touching on a narrow panel.
 		return tab + burpControlsGap + burpControlsWidth(m) + burpTitleX
 	}
-	return tabPad + m.iconW + tabIconGap + textWidth(m.face, cfg.Title) + tabPad
+	return tabPad + m.iconW + tabIconGap + textWidth(m.face, cfg.Title) +
+		tabCloseGap + textWidth(m.iconFace, string(gClose)) + tabPad
 }
 
 // MaxWrapCols is the widest wrap that still fits the canvas, assuming the
@@ -402,7 +464,7 @@ func headerWidth(m *metrics, cfg *Config) int {
 // gutter and so wraps a little sooner; this is the bound a caller can check
 // without having tokenized anything.
 func MaxWrapCols(httpMode bool) int {
-	m, err := loadMetrics()
+	m, err := metricsFor()
 	if err != nil {
 		return defaultWrapCols
 	}
@@ -422,12 +484,15 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	}
 	ui := cfg.Theme.UI
 
-	m, err := loadMetrics()
+	m, err := metricsFor()
 	if err != nil {
 		return nil, err
 	}
 	g := geometryFor(cfg.HTTPMode)
-	digits, gutterW := gutterMetrics(cfg.Lines, m.charWidth, g.gutterL, g.gutterR)
+	digits, gutterW := 0, 0
+	if !cfg.Terminal {
+		digits, gutterW = gutterMetrics(cfg.Lines, m.charWidth, g.gutterL, g.gutterR)
+	}
 
 	// Columns that still fit inside the canvas cap. Anything past this would be
 	// cropped off the right edge, which is exactly the silent evidence loss the
@@ -489,7 +554,9 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	// numbers and the text: snap has always had one, and Burp's message editor
 	// has one too, so both modes draw it.
 	fillRect(img, image.Rect(0, 0, l.totalWidth, l.totalHeight), ui.Bg)
-	fillRect(img, image.Rect(l.gutterW, l.codeAreaY, l.gutterW+1, l.totalHeight), ui.GutterSep)
+	if l.gutterW > 0 {
+		fillRect(img, image.Rect(l.gutterW, l.codeAreaY, l.gutterW+1, l.totalHeight), ui.GutterSep)
+	}
 
 	// Pass 2: header
 	if cfg.HTTPMode {
@@ -499,15 +566,21 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	}
 
 	// Pass 3: visual lines
-	var hlRuns []markRun
+	var hlRuns, redactRuns []markRun
 	y := l.codeAreaY + l.padY
 
 	for _, vl := range vlines {
 		if vl.isGap {
 			fillRect(img, image.Rect(0, y, l.totalWidth, y+gapRowHeight), ui.GapBg)
-			// LineNumFg, not GapFg: the count has to be readable in a report.
-			drawString(img, l.face, gapLabel(vl.skipped), l.codeX,
-				l.baselineIn(y, gapRowHeight), ui.LineNumFg)
+			// Hairlines frame the band as a region; without them it reads as
+			// an oddly empty code line.
+			fillRect(img, image.Rect(0, y, l.totalWidth, y+1), ui.GutterSep)
+			fillRect(img, image.Rect(0, y+gapRowHeight-1, l.totalWidth, y+gapRowHeight), ui.GutterSep)
+			// Centred in the code area: the count belongs to the view, not to
+			// a column of text. LineNumFg, not GapFg — it must stay readable.
+			label := gapLabel(vl.skipped)
+			lx := l.codeX + max(0, (l.totalWidth-l.codeX-textWidth(l.face, label))/2)
+			drawString(img, l.face, label, lx, l.baselineIn(y, gapRowHeight), ui.LineNumFg)
 			y += gapRowHeight
 			continue
 		}
@@ -527,26 +600,31 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 			}
 			hlRuns = append(hlRuns, markRun{box.x1, box.x2, rowY, rowBottom})
 		}
+		for _, box := range l.markBoxes(cfg.RedactRegions, vl.lineNum, vl, wrapCols) {
+			redactRuns = append(redactRuns, markRun{box.x1, box.x2, rowY, rowBottom})
+		}
 
 		// Line number on the first visual row only; continuation rows get a
 		// subtle wrap arrow in the gutter instead. Drawn after the highlight
 		// wash (above) so a whole-line mark never paints over the number.
 		baseline := l.baselineIn(rowY, l.lineHeight)
-		switch {
-		case !vl.isContinuation:
-			lineNumStr := fmt.Sprintf("%*d", l.digits, vl.lineNum)
-			numX := l.gutterW - l.gutterR - l.digits*l.charWidth
-			numFg := ui.LineNumFg
-			if _, marked := cfg.HighlightLines[vl.lineNum]; marked {
-				// Keep the number legible on top of the mark wash.
-				numFg = ui.TabText
+		if l.gutterW > 0 {
+			switch {
+			case !vl.isContinuation:
+				lineNumStr := fmt.Sprintf("%*d", l.digits, vl.lineNum)
+				numX := l.gutterW - l.gutterR - l.digits*l.charWidth
+				numFg := ui.LineNumFg
+				if _, marked := cfg.HighlightLines[vl.lineNum]; marked {
+					// Keep the number legible on top of the mark wash.
+					numFg = ui.TabText
+				}
+				drawString(img, l.face, lineNumStr, numX, baseline, numFg)
+			case !cfg.HTTPMode:
+				// Burp leaves the gutter blank on wrapped rows; the missing
+				// number is the marker. Snap gets an explicit arrow.
+				arrowX := l.gutterW - l.gutterR - l.charWidth
+				drawString(img, l.face, "↩", arrowX, baseline, ui.GapFg)
 			}
-			drawString(img, l.face, lineNumStr, numX, baseline, numFg)
-		case !cfg.HTTPMode:
-			// Burp leaves the gutter blank on wrapped rows; the missing number
-			// is the marker. Snap gets an explicit arrow.
-			arrowX := l.gutterW - l.gutterR - l.charWidth
-			drawString(img, l.face, "↩", arrowX, baseline, ui.GapFg)
 		}
 
 		// Code tokens
@@ -584,8 +662,16 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 
 	// Pass 4: one border per contiguous run of equally-wide marked rows
 	for _, run := range mergeRuns(hlRuns) {
-		drawRectOutline(img, image.Rect(run.x1, run.y1, run.x2, run.y2),
-			ui.HighlightBorder, highlightBorderW)
+		drawRoundedOutline(img, image.Rect(run.x1, run.y1, run.x2, run.y2),
+			markCornerR, ui.HighlightBorder, highlightBorderW)
+	}
+
+	// Redaction goes last: a masked span must cover whatever it overlaps,
+	// including a mark border. Black on every theme — a redaction bar reads
+	// the same whether the report page is dark or white.
+	cfg.Redacted = len(redactRuns)
+	for _, run := range mergeRuns(redactRuns) {
+		fillRect(img, image.Rect(run.x1, run.y1, run.x2, run.y2), color.NRGBA{0, 0, 0, 0xff})
 	}
 
 	if cfg.HTTPMode {
@@ -594,8 +680,12 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	// Caption and footnote go outside the window: they annotate the screenshot,
 	// they are not part of the editor being screenshotted. The footnote sits
 	// inside the caption, closest to the code it describes.
-	out := applyChrome(img, ui)
-	out = withFootnote(out, joinNotes(cfg.SourceRef, cropNote("", cfg.Lines, cfg.TotalLines)), ui, m)
+	panel := img
+	if cfg.WindowChrome {
+		panel = withWindowBar(panel, cfg.Title, ui, m)
+	}
+	out := applyChrome(panel, ui, cfg.Shadow)
+	out = withFootnote(out, joinNotes(cfg.SourceRef, cropNote("", cfg.Lines, cfg.TotalLines), redactNote(cfg.Redacted, cfg.RedactAsked)), ui, m)
 	return withCaption(out, cfg.Caption, ui, m), nil
 }
 
@@ -715,7 +805,8 @@ func gapLabel(skipped int) string {
 func drawTabBar(img *image.NRGBA, l *layout, title string, ui UIColors) {
 	// A title wider than the canvas would run off the edge mid-word, which
 	// looks like a broken render rather than a long path.
-	fixed := tabPad + l.iconW + tabIconGap + tabPad
+	closeW := textWidth(l.iconFace, string(gClose))
+	fixed := tabPad + l.iconW + tabIconGap + tabCloseGap + closeW + tabPad
 	title = ellipsizeLeft(l.face, title, l.totalWidth-fixed)
 
 	tabW := fixed + textWidth(l.face, title)
@@ -731,9 +822,12 @@ func drawTabBar(img *image.NRGBA, l *layout, title string, ui UIColors) {
 
 	ic := iconFor(title)
 	drawString(img, l.iconFace, string(ic.glyph), tabPad,
-		(tabBarHeight+l.iconAscent)/2, ic.color)
+		l.baselineIcon(0, tabBarHeight), ic.color)
 	drawString(img, l.face, title, tabPad+l.iconW+tabIconGap,
 		l.baselineIn(0, tabBarHeight), ui.TabText)
+	// The close button rides the tab's trailing edge, like every editor tab.
+	drawString(img, l.iconFace, string(gClose),
+		tabW-tabPad-closeW, l.baselineIcon(0, tabBarHeight), ui.LineNumFg)
 }
 
 // ellipsizeLeft shortens s from the left to fit maxWidth. The tail is kept
@@ -756,15 +850,80 @@ func ellipsizeLeft(face font.Face, s string, maxWidth int) string {
 
 // applyChrome wraps a panel in a margin with rounded corners and a hairline
 // border, so the output reads as a window instead of a raw crop.
-func applyChrome(panel *image.NRGBA, ui UIColors) *image.NRGBA {
+func applyChrome(panel *image.NRGBA, ui UIColors, shadow bool) *image.NRGBA {
 	pw, ph := panel.Bounds().Dx(), panel.Bounds().Dy()
 	out := image.NewNRGBA(image.Rect(0, 0, pw+2*chromeMargin, ph+2*chromeMargin))
 	fillRect(out, out.Bounds(), ui.ChromeBg)
 
 	inner := image.Rect(chromeMargin, chromeMargin, chromeMargin+pw, chromeMargin+ph)
+	if shadow {
+		drawShadow(out, inner)
+	}
 	draw.Draw(out, inner, panel, panel.Bounds().Min, draw.Src)
 	roundCorners(out, inner, chromeRadius, ui.ChromeBg, ui.TabBorder)
 	return out
+}
+
+// drawShadow lays the window's silhouette under it before the panel is pasted.
+// The silhouette is the window rect pushed down shadowOffsetY; a Chebyshev
+// distance ramp over shadowSpread pixels is what a blur reads as at this size.
+func drawShadow(img *image.NRGBA, win image.Rectangle) {
+	shifted := win.Add(image.Pt(0, shadowOffsetY))
+	black := rgb(0, 0, 0)
+	b := img.Bounds()
+	y0 := max(b.Min.Y, shifted.Min.Y-shadowSpread)
+	y1 := min(b.Max.Y, shifted.Max.Y+shadowSpread)
+	x0 := max(b.Min.X, shifted.Min.X-shadowSpread)
+	x1 := min(b.Max.X, shifted.Max.X+shadowSpread)
+	for y := y0; y < y1; y++ {
+		for x := x0; x < x1; x++ {
+			d := max(max(shifted.Min.X-x, x-shifted.Max.X),
+				max(shifted.Min.Y-y, y-shifted.Max.Y))
+			if t := shadowAlpha * float64(shadowSpread-d) / float64(shadowSpread); t > 0 {
+				img.SetNRGBA(x, y, mix(img.NRGBAAt(x, y), black, t))
+			}
+		}
+	}
+}
+
+// withWindowBar dresses the panel as a window: a title band above the tab bar
+// carrying the traffic-light dots and the file name centred. The dots use the
+// OS palette — they are the window's, not the app's.
+func withWindowBar(panel *image.NRGBA, title string, ui UIColors, m *metrics) *image.NRGBA {
+	w, h := panel.Bounds().Dx(), panel.Bounds().Dy()
+	out := image.NewNRGBA(image.Rect(0, 0, w, h+windowBarH))
+	draw.Draw(out, image.Rect(0, windowBarH, w, h+windowBarH), panel, panel.Bounds().Min, draw.Src)
+	fillRect(out, image.Rect(0, 0, w, windowBarH), ui.TabBarBg)
+	fillRect(out, image.Rect(0, windowBarH-1, w, windowBarH), ui.TabBorder)
+
+	dots := []color.NRGBA{
+		rgb(0xff, 0x5f, 0x57), // close
+		rgb(0xfe, 0xbc, 0x2e), // minimise
+		rgb(0x28, 0xc8, 0x40), // zoom
+	}
+	cy := windowBarH / 2
+	for i, d := range dots {
+		drawCircle(out, windowDotInset+i*(windowDotR*2+windowDotGap)+windowDotR, cy, windowDotR, d)
+	}
+
+	if max := w - 2*windowTitlePad; textWidth(m.uiFace, title) > max {
+		title = ellipsizeLeft(m.uiFace, title, max)
+	}
+	tx := max(0, (w-textWidth(m.uiFace, title))/2)
+	drawString(out, m.uiFace, title, tx, m.baselineUI(0, windowBarH), ui.LineNumFg)
+	return out
+}
+
+// drawCircle fills a disc with an anti-aliased edge.
+func drawCircle(img *image.NRGBA, cx, cy, r int, c color.NRGBA) {
+	for y := cy - r; y <= cy+r; y++ {
+		for x := cx - r; x <= cx+r; x++ {
+			d := math.Hypot(float64(x)+0.5-float64(cx), float64(y)+0.5-float64(cy))
+			if w := clamp01(float64(r) - d + 0.5); w > 0 {
+				img.SetNRGBA(x, y, mix(img.NRGBAAt(x, y), c, w))
+			}
+		}
+	}
 }
 
 // roundCorners masks the corners of r back to bg and strokes a rounded border.
@@ -861,8 +1020,47 @@ func drawRectOutline(img *image.NRGBA, r image.Rectangle, c color.NRGBA, thickne
 	fillRect(img, image.Rect(r.Max.X-thickness, r.Min.Y, r.Max.X, r.Max.Y), c)
 }
 
+// drawRoundedOutline strokes r with corners softened to radius, anti-aliased
+// like the window chrome. Mark boxes use it so the evidence signal shares the
+// window's own corner language instead of a square overlay.
+func drawRoundedOutline(img *image.NRGBA, r image.Rectangle, radius int, c color.NRGBA, thickness int) {
+	radius = min(radius, min(r.Dx(), r.Dy())/2)
+	if radius <= 0 {
+		drawRectOutline(img, r, c, thickness)
+		return
+	}
+	fillRect(img, image.Rect(r.Min.X+radius, r.Min.Y, r.Max.X-radius, r.Min.Y+thickness), c)
+	fillRect(img, image.Rect(r.Min.X+radius, r.Max.Y-thickness, r.Max.X-radius, r.Max.Y), c)
+	fillRect(img, image.Rect(r.Min.X, r.Min.Y+radius, r.Min.X+thickness, r.Max.Y-radius), c)
+	fillRect(img, image.Rect(r.Max.X-thickness, r.Min.Y+radius, r.Max.X, r.Max.Y-radius), c)
+
+	// Same ring math as roundCorners: an anti-aliased annulus per corner.
+	type corner struct {
+		cx, cy float64
+		x0, y0 int
+	}
+	left, right := float64(r.Min.X+radius)-0.5, float64(r.Max.X-radius)-0.5
+	top, bottom := float64(r.Min.Y+radius)-0.5, float64(r.Max.Y-radius)-0.5
+	for _, k := range []corner{
+		{left, top, r.Min.X, r.Min.Y},
+		{right, top, r.Max.X - radius, r.Min.Y},
+		{left, bottom, r.Min.X, r.Max.Y - radius},
+		{right, bottom, r.Max.X - radius, r.Max.Y - radius},
+	} {
+		for y := k.y0; y < k.y0+radius; y++ {
+			for x := k.x0; x < k.x0+radius; x++ {
+				dist := math.Hypot(float64(x)-k.cx, float64(y)-k.cy)
+				ring := clamp01(float64(radius)-dist+0.5) - clamp01(float64(radius-thickness)-dist+0.5)
+				if ring > 0 {
+					img.SetNRGBA(x, y, mix(img.NRGBAAt(x, y), c, ring))
+				}
+			}
+		}
+	}
+}
+
 const (
-	captionGap     = 10           // separates the annotation from the screenshot
+	captionGap     = 15           // separates the annotation from the screenshot
 	captionPadX    = chromeMargin // lines the annotation up with the window edge
 	captionPadY    = 11
 	captionBarW    = 4
@@ -871,7 +1069,7 @@ const (
 
 	// The footnote is the tool's own voice about the crop: smaller, dimmer and
 	// tighter than the analyst's caption, so the two are never mistaken.
-	footnoteGap     = 6
+	footnoteGap     = 10
 	footnotePadY    = 6
 	footnoteLineMul = 1.25
 )
@@ -1050,6 +1248,19 @@ func prefix(label, note string) string {
 		return note
 	}
 	return label + ": " + note
+}
+
+// redactNote declares masked regions. Without it the image could pass for an
+// unedited capture: the box alone is ambiguous — it might be content — so the
+// footnote states the count the way it states a crop.
+func redactNote(n int, asked bool) string {
+	if n == 0 {
+		if asked {
+			return "0 regions redacted"
+		}
+		return ""
+	}
+	return fmt.Sprintf("%d %s redacted", n, plural(n, "region", "regions"))
 }
 
 // joinNotes renders the per-pane crop notes as one strip.

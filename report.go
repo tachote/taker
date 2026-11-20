@@ -3,10 +3,15 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"image"
 	"image/png"
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/tachote/taker/highlight"
 )
@@ -37,22 +42,47 @@ const (
 // what each mark found, what was refused — so an agent can assert on the run
 // instead of reading the messages a human would read.
 type Report struct {
-	Tool     string        `json:"tool"`
-	Version  string        `json:"version"`
-	Mode     string        `json:"mode"`
-	OK       bool          `json:"ok"`
-	Exit     int           `json:"exit"`
-	Output   string        `json:"output,omitempty"`
-	Bytes    int64         `json:"bytes,omitempty"`
-	Width    int           `json:"width,omitempty"`
-	Height   int           `json:"height,omitempty"`
-	Source   *Source       `json:"source,omitempty"`
-	Crop     *Crop         `json:"crop,omitempty"`
-	Panels   *Panels       `json:"panels,omitempty"`
-	Marks    []MarkReport  `json:"marks,omitempty"`
-	Themes   []ThemeReport `json:"themes,omitempty"`
-	Warnings []string      `json:"warnings"`
-	Error    *ReportError  `json:"error,omitempty"`
+	Tool    string `json:"tool"`
+	Version string `json:"version"`
+	Mode    string `json:"mode"`
+	OK      bool   `json:"ok"`
+	Exit    int    `json:"exit"`
+	Output  string `json:"output,omitempty"`
+	Bytes   int64  `json:"bytes,omitempty"`
+	Width   int    `json:"width,omitempty"`
+	Height  int    `json:"height,omitempty"`
+	// Command is the argv line that produced the image and Generated the UTC
+	// time — provenance a reviewer can check without trusting the caption.
+	Command   string       `json:"command,omitempty"`
+	Generated string       `json:"generated,omitempty"`
+	DryRun    bool         `json:"dry_run,omitempty"`
+	Source    *Source      `json:"source,omitempty"`
+	Crop      *Crop        `json:"crop,omitempty"`
+	Panels    *Panels      `json:"panels,omitempty"`
+	SHA256    []SourceHash `json:"sha256,omitempty"`
+	// Redactions is how many black boxes the image carries. A value of zero
+	// means nothing was masked; a consumer can require non-zero for captures
+	// that are supposed to hide credentials.
+	Redactions int           `json:"redactions"`
+	Marks      []MarkReport  `json:"marks,omitempty"`
+	Themes     []ThemeReport `json:"themes,omitempty"`
+	// Exec carries what the executed command did — taker's own exit says the
+	// evidence was produced, this says what the command under test answered.
+	Exec     *ExecReport `json:"exec,omitempty"`
+	Warnings []string    `json:"warnings"`
+	// Help carries the next command that unblocks or completes this run, per
+	// AXI's contextual disclosure: a consumer that hit a usage wall, a trim
+	// that ate the mark, or a dry run gets the fix instead of a manual.
+	Help  []string     `json:"help,omitempty"`
+	Error *ReportError `json:"error,omitempty"`
+}
+
+// SourceHash names one rendered input and its fingerprint: "source" for a
+// code file, "request"/"response" for an HTTP pane, "transcript" for `taker
+// exec` output. The same pairs travel inside the PNG as tEXt chunks.
+type SourceHash struct {
+	Name string `json:"name"`
+	Sum  string `json:"sum"`
 }
 
 // Source says where the rendered bytes came from. Rev is the short commit when
@@ -74,11 +104,14 @@ type Crop struct {
 	Total *int `json:"total"`
 }
 
-// Panels carries one Crop per pane for `taker http`. Unlike an excerpt, a whole
-// message is always in hand, so Total is never null there.
+// Panels carries one Crop per rendered pane for `taker http`. A pane is absent
+// when the run only had one message — `taker http -r req.http` produces no
+// response key — so a consumer can tell a trimmed panel from one that never
+// existed. Unlike an excerpt, a whole message is always in hand, so Total is
+// never null there.
 type Panels struct {
-	Request  Crop `json:"request"`
-	Response Crop `json:"response"`
+	Request  *Crop `json:"request,omitempty"`
+	Response *Crop `json:"response,omitempty"`
 }
 
 // MarkReport is one --mark literal's outcome. Kept and Dropped are what the
@@ -90,6 +123,14 @@ type MarkReport struct {
 	Lines   int    `json:"lines"`
 	Kept    int    `json:"kept"`
 	Dropped int    `json:"dropped"`
+}
+
+// ExecReport records the child command's outcome for `taker exec` — the
+// footnote in the PNG shows it, and the report carries the same fact as data,
+// so a consumer asserting "the PoC ran" is not guessing from a screenshot.
+type ExecReport struct {
+	Exit     *int `json:"exit"`
+	TimedOut bool `json:"timed_out,omitempty"`
 }
 
 // ThemeReport is one palette, for --list-themes --json.
@@ -106,31 +147,216 @@ type ReportError struct {
 }
 
 // reporter owns the two output channels of one run: the human lines on stderr,
-// and the report on stdout that --json switches on. Every way out of a command
-// goes through it, so a consumer that asked for JSON always gets a document —
-// including the runs that failed, which are the ones it most needs to classify.
+// and the report on stdout. format picks the stdout encoding — "" for none on
+// success, "json" for --json, "toon" for --toon — but a failure always emits a
+// document, because a caller that greps an empty stdout for why a run died has
+// nothing to act on. Every way out of a command goes through it, so a consumer
+// always gets something it can classify.
 type reporter struct {
-	out      io.Writer // stdout: the report, the theme list, nothing else
-	machines bool      // --json
-	rep      Report
+	out    io.Writer // stdout: the report, the theme list, nothing else
+	format string    // "", "json" or "toon"
+	rep    Report
+	metaKV [][2]string // PNG tEXt chunks beyond the always-present set
+	// secrets are the --redact literals of this run: the image hides them,
+	// so every string that leaves the process — warnings, help, errors,
+	// provenance — hides them too. Set as early as the flags are known.
+	secrets []string
+	// secretRes are the compiled --redact-re patterns: a pattern's literal
+	// text is already a secret, but its MATCHES are secrets it does not
+	// name — a token caught by the regex in a filename only stays hidden if
+	// the pattern itself scrubs the strings it touches.
+	secretRes []*regexp.Regexp
+	// fragOnly holds the needles' separator-split components — for the pixel
+	// redaction, so a needle spliced by quotes or escapes leaves no readable
+	// fragment behind.
+	fragOnly []string
 }
 
-func newReporter(jsonOut bool, mode string) *reporter {
+func newReporter(format, mode string) *reporter {
 	return &reporter{
-		out:      os.Stdout,
-		machines: jsonOut,
+		out:    os.Stdout,
+		format: format,
 		rep: Report{
-			Tool:     "taker",
-			Version:  version,
-			Mode:     mode,
-			Warnings: []string{},
+			Tool:      "taker",
+			Version:   version,
+			Mode:      mode,
+			Generated: time.Now().UTC().Format(time.RFC3339),
+			Warnings:  []string{},
 		},
 	}
 }
 
-// note prints a human line that the report does not need to carry.
+// addInput records one input's fingerprint in the report and in the PNG's own
+// metadata, so the image and the JSON say the same thing about its bytes.
+// The hash covers the content AFTER the declared needles are masked — hashing
+// the raw bytes would ship a brute-force oracle: the image shows the file's
+// whole structure, so sha256(visible % candidate) would verify guesses at
+// low-entropy secrets. An auditor reproduces the hash by masking first.
+func (r *reporter) addInput(name string, data []byte) {
+	sum := sha256Hex([]byte(r.scrub(string(data))))
+	r.rep.SHA256 = append(r.rep.SHA256, SourceHash{Name: name, Sum: sum})
+	key := "taker:sha256"
+	if name != "source" {
+		key += ":" + name
+	}
+	r.metaKV = append(r.metaKV, [2]string{key, sum})
+}
+
+// setSecrets registers the --redact literals; every channel that formats a
+// message from then on scrubs them — including Command, which was already
+// recorded, so it is scrubbed right here.
+func (r *reporter) setSecrets(secrets []string) { r.setSecretsAll(secrets, nil) }
+
+// setSecretsAll registers literals and patterns; fragments come from the
+// literals only — a pattern like eyJ[...]+ split on '-' would paint boxes
+// over arbitrary code text.
+func (r *reporter) setSecretsAll(secrets, literals []string) {
+	// Dedupe, then also register each needle's separator-split components
+	// (len >= 3): a second-stage parser that fails echoes only a fragment —
+	// strconv.Atoi on "ZX9-liveroot-8842" reports parsing "ZX9" — and the
+	// full needle never matches the fragment it echoes.
+	seen := map[string]bool{}
+	var expanded []string
+	add := func(s string) {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			expanded = append(expanded, s)
+		}
+	}
+	var frags []string
+	for _, sec := range secrets {
+		add(sec)
+	}
+	for _, sec := range literals {
+		for _, part := range strings.FieldsFunc(sec, func(r rune) bool {
+			return strings.ContainsRune("-:=,/.; \t", r)
+		}) {
+			if len(part) >= 2 && part != sec {
+				add(part)
+				frags = append(frags, part)
+			}
+		}
+	}
+	r.secrets = expanded
+	// fragOnly is the component list without the full needles — the pixel
+	// redaction masks them so a needle spliced by quotes or escapes does not
+	// leave a readable fragment behind.
+	r.fragOnly = frags
+	r.scrubSecrets()
+}
+
+// redactArgRe masks the VALUE after --redact/--redact-re in an echoed command
+// line. It does not need a successful parse to know what to hide — a flag that
+// failed to parse still leaked its value into the recorded argv, and the
+// secrets slice is empty on that path.
+// A single space or "=" separates flag and value; an empty argv token leaves
+// a double space in the joined command, and requiring one exact space keeps
+// the next flag from being eaten as a "value".
+var redactArgRe = regexp.MustCompile(`(--redact(?:-re)?)(?:=| )("[^"]*"|'[^']*'|\S+)`)
+
+func scrubRedactArgs(s string) string {
+	return redactArgRe.ReplaceAllString(s, "${1} <redacted>")
+}
+
+// scrub replaces each secret with a marker — the marker is itself evidence:
+// the reader sees a value was given and hidden, not that it was absent.
+// scrub masks every needle in one left-to-right pass. Sequential ReplaceAll
+// corrupted on itself twice over: the emitted <redacted> contains characters
+// a later needle can match — w<red<a<cted> — and a needle that is a prefix of
+// another would mask the shorter one first. A single scan emitting the marker
+// and skipping the match does neither, and it also covers the %q-quoted form
+// a warning produces for a needle holding " or \.
+func (r *reporter) scrub(s string) string {
+	if len(r.secrets) == 0 && len(r.secretRes) == 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		// The marker is opaque: scrubbing runs several times over the same
+		// document — format-time, the mid-run pass, emit — and a needle that
+		// matched inside <redacted> would nest markers every pass. Skipping
+		// it is what makes re-scrubbing idempotent.
+		if strings.HasPrefix(s[i:], "<redacted>") {
+			b.WriteString("<redacted>")
+			i += len("<redacted>")
+			continue
+		}
+		if n := r.matchLen(s[i:]); n > 0 {
+			b.WriteString("<redacted>")
+			i += n
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// matchLen returns how many leading bytes of t one needle covers — the
+// longest literal, its %q-quoted twin, or a pattern anchored at position 0.
+// Zero-width pattern matches return 0, so a degenerate regex can't consume.
+func (r *reporter) matchLen(t string) int {
+	best := 0
+	for _, sec := range r.secrets {
+		if sec == "" {
+			continue
+		}
+		if strings.HasPrefix(t, sec) && len(sec) > best {
+			best = len(sec)
+		}
+		if q := strconv.Quote(sec); strings.HasPrefix(t, q) && len(q) > best {
+			best = len(q)
+		}
+	}
+	for _, re := range r.secretRes {
+		if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 && loc[1] > best {
+			best = loc[1]
+		}
+	}
+	return best
+}
+
+// scrubSecrets replaces each literal in the recorded provenance — the
+// report's command, source path, and the PNG's tEXt chunks. A value the
+// image hides must not travel verbatim in the metadata of the same file, or
+// the redaction leaks through the channel meant to make it defensible.
+// Warnings and help are scrubbed at format time, so they never carry the
+// literal regardless of ordering.
+func (r *reporter) scrubSecrets() {
+	// ANSI escapes inside a recorded command split a needle the same way they
+	// do inside a file — normalize before masking or `mR9!^[[31mkXv2` keeps
+	// both halves readable in the PNG's own tEXt chunk.
+	deansi := func(s string) string {
+		b, _ := stripANSI([]byte(s))
+		return string(b)
+	}
+	r.rep.Command = scrubRedactArgs(r.scrub(deansi(r.rep.Command)))
+	if r.rep.Source != nil {
+		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
+	}
+	for i, kv := range r.metaKV {
+		r.metaKV[i][1] = scrubRedactArgs(r.scrub(deansi(kv[1])))
+	}
+	for i, w := range r.rep.Warnings {
+		r.rep.Warnings[i] = r.scrub(w)
+	}
+	for i, m := range r.rep.Marks {
+		r.rep.Marks[i].Needle = r.scrub(m.Needle)
+	}
+	r.rep.Output = r.scrub(r.rep.Output)
+}
+
+// helpf records the command that fixes or completes the current situation.
+// Call it before fail() — the hints travel inside the error document.
+func (r *reporter) helpf(format string, args ...any) {
+	r.rep.Help = append(r.rep.Help, r.scrub(fmt.Sprintf(format, args...)))
+}
+
+// note prints a human line that the report does not need to carry — scrubbed
+// like every channel, because stderr is what people pipe into logs.
 func (r *reporter) note(format string, args ...any) {
-	fmt.Fprintf(os.Stderr, "taker: "+format+"\n", args...)
+	fmt.Fprint(os.Stderr, "taker: "+r.scrub(fmt.Sprintf(format, args...))+"\n")
 }
 
 // warn prints a line that changes how the image has to be read — a clamped
@@ -142,16 +368,16 @@ func (r *reporter) note(format string, args ...any) {
 // report's warnings array has to be able to tell a caveat from an ordinary line,
 // and the same text travels in all three.
 func (r *reporter) warn(format string, args ...any) {
-	msg := fmt.Sprintf("warning: "+format, args...)
-	r.note("%s", msg)
-	r.rep.Warnings = append(r.rep.Warnings, "taker: "+msg)
+	msg := r.scrub(fmt.Sprintf(format, args...))
+	r.note("warning: %s", msg)
+	r.rep.Warnings = append(r.rep.Warnings, msg)
 }
 
 // fail reports why the evidence was not produced and returns the exit code for
 // the caller to hand to os.Exit. Failing without a report would leave a
 // consumer grepping prose for the reason it already asked for in JSON.
 func (r *reporter) fail(code int, kind, format string, args ...any) int {
-	msg := fmt.Sprintf(format, args...)
+	msg := r.scrub(fmt.Sprintf(format, args...))
 	r.note("%s", msg)
 	r.rep.OK = false
 	r.rep.Exit = code
@@ -170,6 +396,9 @@ func (r *reporter) done(path string) int {
 	} else {
 		r.rep.Output = path
 	}
+	if r.scrub(r.rep.Output) != r.rep.Output {
+		r.warn("output path contains a redacted needle — the report shows the masked form")
+	}
 	if fi, err := os.Stat(path); err == nil {
 		r.rep.Bytes = fi.Size()
 	}
@@ -182,18 +411,47 @@ func (r *reporter) done(path string) int {
 	return r.emit(exitOK)
 }
 
-// emit writes the report when --json was asked for, and always returns the code
-// so callers can pass it straight to os.Exit.
+// doneDry reports a render that was validated but deliberately not written:
+// the caller checked everything the image would claim — marks, crops, height —
+// without producing the file. --dry-run exists so an agent can preflight a run
+// before deciding it is worth uploading.
+func (r *reporter) doneDry(img image.Image) int {
+	r.rep.OK = true
+	r.rep.Exit = exitOK
+	r.rep.DryRun = true
+	b := img.Bounds()
+	r.rep.Width, r.rep.Height = b.Dx(), b.Dy()
+	r.helpf("rerun without --dry-run to write the PNG")
+	r.note("dry run: would write a %dx%d image", b.Dx(), b.Dy())
+	return r.emit(exitOK)
+}
+
+// emit writes the report in the format that was asked for, and always returns
+// the code so callers can pass it straight to os.Exit. A failed run emits a
+// TOON document even with no format flag: the error is the one piece of output
+// a consumer can least afford to lose to stderr.
 func (r *reporter) emit(code int) int {
-	if !r.machines {
-		return code
+	// Last line of defense: every exit path ends here, so nothing that a
+	// validation failure could leave behind — a literal in Command set before
+	// secrets were known, a warning carrying a secret — survives into the
+	// document. Scrubbing is idempotent; ordering never decides safety.
+	r.scrubSecrets()
+	switch {
+	case r.format == "json":
+		buf, err := json.MarshalIndent(r.rep, "", "  ")
+		if err != nil {
+			r.note("could not encode the json report: %v", err)
+			return code
+		}
+		fmt.Fprintln(r.out, string(buf))
+	case r.format == "toon" || !r.rep.OK:
+		text, err := r.reportTOON()
+		if err != nil {
+			r.note("could not encode the toon report: %v", err)
+			return code
+		}
+		fmt.Fprintln(r.out, text)
 	}
-	buf, err := json.MarshalIndent(r.rep, "", "  ")
-	if err != nil {
-		r.note("could not encode the json report: %v", err)
-		return code
-	}
-	fmt.Fprintln(r.out, string(buf))
 	return code
 }
 
@@ -203,7 +461,16 @@ func (r *reporter) emit(code int) int {
 // vulnerable line. The count is the only thing that tells them apart.
 func recordMarks(rep *reporter, stats []highlight.MarkStats) {
 	for _, st := range stats {
-		rep.note("%s", st.Message())
+		if st.Matches == 0 {
+			// A mark that landed nowhere is a caveat the consumer must see —
+			// through warnings, not just a stderr line a pipeline never reads.
+			// Message() already carries its "warning: " prefix.
+			msg := st.Message()
+			rep.note("%s", msg)
+			rep.rep.Warnings = append(rep.rep.Warnings, strings.TrimPrefix(msg, "warning: "))
+		} else {
+			rep.note("%s", st.Message())
+		}
 		rep.rep.Marks = append(rep.rep.Marks, MarkReport{
 			Needle:  st.Literal,
 			Matches: st.Matches,
@@ -211,6 +478,9 @@ func recordMarks(rep *reporter, stats []highlight.MarkStats) {
 			Kept:    st.Matches - st.Dropped,
 			Dropped: st.Dropped,
 		})
+		if st.Dropped > 0 {
+			rep.helpf("raise --max-marks or narrow %q to box the %d matches left out", st.Literal, st.Dropped)
+		}
 	}
 }
 
@@ -223,4 +493,14 @@ func cropOf(ext highlight.ViewExtent, total int) Crop {
 		c.Total = &total
 	}
 	return c
+}
+
+// redactFrags returns the pixel-mask fragments — but only when keep is off:
+// --redact-keep shows a span's leading chars, and a kept fragment would show
+// its own. Keep mode is already a weakened guarantee the user asked for.
+func (r *reporter) redactFrags(keep int) []string {
+	if keep > 0 {
+		return nil
+	}
+	return r.fragOnly
 }

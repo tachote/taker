@@ -37,7 +37,7 @@ func captureStderr(t *testing.T, fn func()) string {
 // the decoded report, and whatever went to stderr.
 func runJSON(t *testing.T, fn func(*reporter) int) (int, Report, string) {
 	t.Helper()
-	rep := newReporter(true, "snap")
+	rep := newReporter("json", "snap")
 	var out bytes.Buffer
 	rep.out = &out
 
@@ -63,6 +63,9 @@ func snapCmd(c SnapCmd) *SnapCmd {
 	}
 	if c.FirstLine == 0 {
 		c.FirstLine = 1
+	}
+	if c.Chrome == "" {
+		c.Chrome = "editor"
 	}
 	return &c
 }
@@ -250,7 +253,7 @@ func TestHTTPReportDescribesBothPanels(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rep := newReporter(true, "http")
+	rep := newReporter("json", "http")
 	var out bytes.Buffer
 	rep.out = &out
 
@@ -290,7 +293,7 @@ func TestWithoutJSONStdoutIsSilent(t *testing.T) {
 	if err := os.WriteFile(file, []byte("a = 1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rep := newReporter(false, "snap")
+	rep := newReporter("", "snap")
 	var out bytes.Buffer
 	rep.out = &out
 
@@ -307,5 +310,330 @@ func TestWithoutJSONStdoutIsSilent(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "wrote") {
 		t.Errorf("the human channel lost the confirmation: %q", stderr)
+	}
+}
+
+// splitCapture is what makes `taker http -f` accept a Burp "Save item" file:
+// request then response in one capture, split on the status line.
+func TestSplitCapture(t *testing.T) {
+	req := "POST /x HTTP/1.1\nHost: a\n\n{}\n"
+	res := "HTTP/1.1 200 OK\nContent-Length: 2\n\n{}\n"
+
+	r1, r2 := splitCapture([]byte(req + res))
+	if string(r1) != strings.TrimRight(req, "\n") || string(r2) != res {
+		t.Errorf("pair split wrong:\nreq=%q\nres=%q", r1, r2)
+	}
+	if r1, r2 := splitCapture([]byte(res)); r1 != nil || string(r2) != res {
+		t.Errorf("response-only file split = %q/%q", r1, r2)
+	}
+	if r1, r2 := splitCapture([]byte(req)); string(r1) != req || r2 != nil {
+		t.Errorf("request-only file split = %q/%q", r1, r2)
+	}
+}
+
+func TestCompileRegexRejectsBadPattern(t *testing.T) {
+	if _, err := compileRegex("--mark-re", []string{"["}); err == nil {
+		t.Error("bad pattern should be a usage error, not a render failure")
+	}
+	if _, err := compileRegex("--redact-re", []string{"("}); err == nil ||
+		!strings.Contains(err.Error(), "--redact-re") {
+		t.Error("the error should name the flag the pattern came from")
+	}
+}
+
+// --dry-run validates the whole render — marks, trims, height — and reports
+// the size the PNG would have, without the PNG.
+func TestDryRunWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.py")
+	if err := os.WriteFile(file, []byte("x = 1\ny = 2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "out.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: out, DryRun: true, JSON: true}), r)
+	})
+	if code != exitOK || !rep.DryRun {
+		t.Fatalf("dry run = %d, report %+v", code, rep)
+	}
+	if rep.Width == 0 || rep.Height == 0 {
+		t.Error("dry run should still report the image's dimensions")
+	}
+	if _, err := os.Stat(out); !os.IsNotExist(err) {
+		t.Error("dry run wrote the PNG it promised not to")
+	}
+}
+
+// The report carries the same provenance the PNG embeds: input hashes and the
+// redaction count the footnote declares.
+func TestReportCarriesProvenanceAndRedactions(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "s.go")
+	src := "package a\nvar k = \"sekret-token\"\n"
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "o.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: out, Redact: []string{"sekret-token"}, JSON: true}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	// Full needle plus its separator-split components: sekret-token splits
+	// into "sekret" and "token", and each is a box the image really draws.
+	if rep.Redactions != 3 {
+		t.Errorf("redactions = %d, want 3 (needle + 2 fragments)", rep.Redactions)
+	}
+	// The hash covers the content AS MASKED — hashing the raw bytes would
+	// ship a brute-force oracle for the needle the image hides. The %q twin
+	// masks the quotes along with the needle.
+	masked := strings.ReplaceAll(src, `"sekret-token"`, "<redacted>")
+	if len(rep.SHA256) != 1 || rep.SHA256[0].Name != "source" || rep.SHA256[0].Sum != sha256Hex([]byte(masked)) {
+		t.Errorf("sha256 = %+v, want the masked source's fingerprint", rep.SHA256)
+	}
+	if rep.Generated == "" {
+		t.Error("no generated timestamp")
+	}
+	// The PNG embeds the same data: the image is self-describing when it
+	// travels without the report.
+	png, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(png, []byte("taker:sha256")) {
+		t.Error("PNG does not carry the input hash as a tEXt chunk")
+	}
+}
+
+// `taker exec` runs the command and the report says so — source.kind, the
+// command line as the path, and the rendered transcript.
+func TestExecRunsAndReports(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "o.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runExec(&ExecCmd{
+			Args: []string{"echo", "hello-evidence"}, Output: out, Timeout: 5,
+			Theme: "vscode-dark", Chrome: "window", WrapWidth: 80, JSON: true,
+		}, r)
+	})
+	if code != exitOK {
+		t.Fatalf("exec = %d, report %+v", code, rep)
+	}
+	if rep.Source == nil || rep.Source.Kind != "exec" || rep.Source.Path != "echo hello-evidence" {
+		t.Errorf("source = %+v", rep.Source)
+	}
+	if len(rep.SHA256) == 0 || rep.SHA256[0].Name != "transcript" {
+		t.Errorf("no transcript fingerprint in %+v", rep.SHA256)
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Error("no PNG written")
+	}
+}
+
+func TestExecRequiresACommand(t *testing.T) {
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runExec(&ExecCmd{Theme: "vscode-dark", Chrome: "window", WrapWidth: 80, JSON: true}, r)
+	})
+	if code != exitUsage || rep.Error == nil {
+		t.Errorf("exec without a command = %d %+v, want a usage error", code, rep.Error)
+	}
+}
+
+// A single-side HTTP run only reports the panel it rendered: an absent pane is
+// different from a rendered pane whose extent is zero.
+func TestHTTPPanelsAreOptional(t *testing.T) {
+	dir := t.TempDir()
+	req := filepath.Join(dir, "r.http")
+	if err := os.WriteFile(req, []byte("GET / HTTP/1.1\nHost: x\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "o.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{Request: req, Output: out, JSON: true}, r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	if rep.Panels == nil || rep.Panels.Request == nil || rep.Panels.Response != nil {
+		t.Errorf("panels = %+v, want request only", rep.Panels)
+	}
+}
+
+// The echoed command masks --redact values even on paths where parsing never
+// produced a secrets slice — a flag that failed to parse still leaked its
+// argument into the recorded argv.
+// kong.Must panics on a malformed struct tag — a help string with an invalid
+// escape once made the binary unstartable while every test stayed green.
+// Building the parser here is the regression tripwire.
+func TestCLIParses(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("kong tag panic: %v", r)
+		}
+	}()
+	parser := newParser()
+	if parser == nil {
+		t.Fatal("nil parser")
+	}
+}
+
+func TestScrubRedactArgs(t *testing.T) {
+	for in, want := range map[string]string{
+		`taker snap f.py --redact hunter2 -o x.png`:           `taker snap f.py --redact <redacted> -o x.png`,
+		`taker snap f.py --redact=hunter2 -o x.png`:           `taker snap f.py --redact <redacted> -o x.png`,
+		`taker term t.log -- --redact aa-bb-99`:               `taker term t.log -- --redact <redacted>`,
+		`taker http -f x --redact-re 'eyJ[^ ]+' -s r`:         `taker http -f x --redact-re <redacted> -s r`,
+		`taker snap f.py --mark hunter2 -o x.png`:             `taker snap f.py --mark hunter2 -o x.png`,
+		`taker snap f.py --redact-keep 4 --redact a -o x.png`: `taker snap f.py --redact-keep 4 --redact <redacted> -o x.png`,
+	} {
+		if got := scrubRedactArgs(in); got != want {
+			t.Errorf("scrubRedactArgs(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// --redact hides the value in the image; it must also hide it in the
+// provenance — a literal left in taker:command or the report's command field
+// would leak the very thing the boxes mask.
+func TestScrubSecrets(t *testing.T) {
+	rep := newReporter("", "snap")
+	rep.setSecrets([]string{"hunter2"})
+	rep.rep.Command = `taker snap f.py --redact hunter2 -o out.png`
+	rep.rep.Source = &Source{Kind: "exec", Path: "curl -H 'Bearer hunter2' x"}
+	rep.metaKV = append(rep.metaKV,
+		[2]string{"taker:command", rep.rep.Command},
+		[2]string{"taker:exec", "curl -H 'Bearer hunter2' x"},
+		[2]string{"taker:sha256", "abc123"})
+	rep.rep.Warnings = append(rep.rep.Warnings, `taker: warning: --redact "hunter2" matched nothing`)
+	rep.scrubSecrets()
+
+	for _, got := range []string{
+		rep.rep.Command, rep.rep.Source.Path,
+		rep.metaKV[0][1], rep.metaKV[1][1], rep.rep.Warnings[0],
+	} {
+		if strings.Contains(got, "hunter2") {
+			t.Errorf("secret survives in %q", got)
+		}
+		if !strings.Contains(got, "<redacted>") {
+			t.Errorf("no <redacted> marker in %q", got)
+		}
+	}
+	if rep.metaKV[2][1] != "abc123" {
+		t.Error("scrubbing touched an unrelated chunk")
+	}
+}
+
+// The same fact end-to-end: the PNG's metadata bytes carry no redact literal.
+func TestRedactDoesNotLeakIntoPNG(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "c.py")
+	secret := "wJalrXUtnFEMI7EXAMPLEKEY"
+	if err := os.WriteFile(file, []byte("SECRET = \""+secret+"\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "o.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: out, Redact: []string{secret}, JSON: true}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	if strings.Contains(rep.Command, secret) {
+		t.Error("report command carries the redacted literal")
+	}
+	png, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(png, []byte(secret)) {
+		t.Error("PNG metadata embeds the redacted literal — the box hides it, the tEXt leaks it")
+	}
+}
+
+// A mark that matched nothing is a caveat: it lands in warnings[] so a
+// pipeline sees it, not only on a stderr line nobody reads.
+func TestMarkMatchedNothingLandsInWarnings(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(file, []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: filepath.Join(dir, "o.png"), Mark: []string{"zz-not-here"}, JSON: true}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	if len(rep.Warnings) != 1 || !strings.Contains(rep.Warnings[0], "matched nothing") {
+		t.Errorf("warnings = %v, want the zero-match caveat", rep.Warnings)
+	}
+}
+
+// -f fed a non-HTTP file is an input error, not a confident Request pane.
+// A capture with no response section renders the request with a warning.
+func TestHTTPFValidation(t *testing.T) {
+	dir := t.TempDir()
+	junk := filepath.Join(dir, "nmap.txt")
+	if err := os.WriteFile(junk, []byte("$ nmap -sV host\nPORT STATE\n80/tcp open\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{File: junk, Output: filepath.Join(dir, "o.png"), JSON: true}, r)
+	})
+	if code != exitInput {
+		t.Fatalf("garbage -f = %d, want input error", code)
+	}
+
+	only := filepath.Join(dir, "req.http")
+	if err := os.WriteFile(only, []byte("GET /x HTTP/1.1\nHost: a\n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{File: only, Output: filepath.Join(dir, "o2.png"), JSON: true}, r)
+	})
+	if code != exitOK {
+		t.Fatalf("request-only -f = %d", code)
+	}
+	found := false
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, "no response section") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("no 'no response section' warning in %v", rep.Warnings)
+	}
+}
+
+// exec's provenance gets the same scrub: a token in --sh that --redact hides
+// must not survive in source.path, the report command, or the taker:exec
+// chunk embedded in the PNG.
+func TestExecScrubsShellSecrets(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "o.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runExec(&ExecCmd{
+			Shell:  "echo Bearer topsecretvalue",
+			Redact: []string{"topsecretvalue"},
+			Output: out, Timeout: 5,
+			Theme: "vscode-dark", Chrome: "window", WrapWidth: 80, JSON: true,
+		}, r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	if rep.Source == nil || strings.Contains(rep.Source.Path, "topsecretvalue") {
+		t.Errorf("source.path leaks the redacted literal: %+v", rep.Source)
+	}
+	if strings.Contains(rep.Command, "topsecretvalue") {
+		t.Error("report command leaks the literal")
+	}
+	png, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(png, []byte("topsecretvalue")) {
+		t.Error("the taker:exec chunk embeds the redacted literal")
 	}
 }
