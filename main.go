@@ -15,7 +15,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 	"unicode"
 
@@ -1230,8 +1229,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	// Kill the whole process group on the deadline: a child that forks a
 	// sleeper leaves the pipe open, and CommandContext's lone kill would
 	// leave us blocked reading it until the grandchild exits on its own.
-	child := exec.Command(argv[0], argv[1:]...)
-	child.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	child := newChild(argv)
 	var buf bytes.Buffer
 	child.Stdout, child.Stderr = &buf, &buf
 	var runErr error
@@ -1243,7 +1241,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 		select {
 		case runErr = <-waitc:
 		case <-ctx.Done():
-			syscall.Kill(-child.Process.Pid, syscall.SIGKILL)
+			killGroup(child)
 			<-waitc
 		}
 	}
