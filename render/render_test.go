@@ -682,8 +682,9 @@ func TestRedactKeepLeavesPrefixVisible(t *testing.T) {
 		t.Fatal(err)
 	}
 	redact, _ := highlight.FindMarks([][]highlight.LineTokens{lines}, []string{"hunter2"}, 0)
+	kept4, _ := highlight.KeepSpans(redact[0], 4)
 	cfg := &Config{Lines: lines, Title: "t", Theme: DefaultTheme,
-		RedactRegions: highlight.KeepSpans(redact[0], 4), noWarn: true}
+		RedactRegions: kept4, noWarn: true}
 	if _, err := Render(cfg); err != nil {
 		t.Fatal(err)
 	}
@@ -691,8 +692,9 @@ func TestRedactKeepLeavesPrefixVisible(t *testing.T) {
 		t.Fatalf("Redacted = %d, want 1 (the suffix stays hidden)", cfg.Redacted)
 	}
 
+	kept7, _ := highlight.KeepSpans(redact[0], 7)
 	cfg2 := &Config{Lines: lines, Title: "t", Theme: DefaultTheme,
-		RedactRegions: highlight.KeepSpans(redact[0], 7), noWarn: true}
+		RedactRegions: kept7, noWarn: true}
 	if _, err := Render(cfg2); err != nil {
 		t.Fatal(err)
 	}

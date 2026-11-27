@@ -1,6 +1,8 @@
 package highlight
 
 import (
+	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -117,14 +119,123 @@ func TestKeepSpans(t *testing.T) {
 		4: {{Start: 1, End: 3}},
 		5: {{}},
 	}
-	got := KeepSpans(m, 4)
+	got, consumed := KeepSpans(m, 4)
+	if consumed != 1 {
+		t.Errorf("consumed = %d, want 1 (line 4; the whole-line span is not a redaction)", consumed)
+	}
 	if len(got) != 1 || len(got[3]) != 1 {
 		t.Fatalf("KeepSpans kept %v, want only line 3", got)
 	}
 	if got[3][0] != (Span{Start: 9, End: 20}) {
 		t.Errorf("span = %v, want {9 20}", got[3][0])
 	}
-	if KeepSpans(m, 0) == nil {
+	if got, consumed := KeepSpans(m, 0); got == nil || consumed != 0 {
 		t.Error("keep 0 should return the map untouched")
+	}
+}
+
+// The CLI's per-literal guard measured bytes: "ñññññ" is 10 bytes, so keep 5
+// passed it while the span (5 characters) was consumed whole and the secret
+// drew in full. The count is what lets a caller catch that without guessing
+// the unit.
+func TestKeepSpansCountsMultibyteConsumed(t *testing.T) {
+	lines, err := Tokenize("user=ñññññ\ntoken=abcdefghijkl\n", "text", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, _ := FindMarks([][]LineTokens{lines}, []string{"ñññññ", "abcdefghijkl"}, 0)
+	kept, consumed := KeepSpans(found[0], 5)
+	if consumed != 1 {
+		t.Errorf("consumed = %d, want 1: the 5-character literal is exposed whole", consumed)
+	}
+	if kept.Has(1) {
+		t.Errorf("line 1 kept a span %v; keep 5 of 5 characters hides nothing", kept[1])
+	}
+	if got := kept[2]; len(got) != 1 || got[0] != (Span{Start: 12, End: 18}) {
+		t.Errorf("line 2 = %v, want {12 18}", got)
+	}
+}
+
+// One pattern, two match lengths: the short match is consumed, the long one is
+// shortened. Before the count, the all-or-nothing check upstream saw one span
+// left and reported nothing about the one drawn in full.
+func TestKeepSpansCountsShortRegexMatches(t *testing.T) {
+	lines, err := Tokenize("a=tok_ab\nb=tok_abcdefghij\n", "text", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile("tok_[a-z]+")
+	found, _ := FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 0)
+	kept, consumed := KeepSpans(found[0], 6)
+	if consumed != 1 {
+		t.Errorf("consumed = %d, want 1 (tok_ab is 6 characters)", consumed)
+	}
+	if kept.Has(1) || !kept.Has(2) {
+		t.Errorf("kept lines = %v, want only line 2", kept.Lines())
+	}
+}
+
+// A JSON response body is usually one line. Measuring every match from column
+// 1 made this quadratic in the line length; a minified body with a pattern
+// that matches often took seconds.
+func BenchmarkFindRegexMarksLongLine(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&sb, `{"id":%d,"n":"é"},`, i)
+	}
+	lines := linesOf(sb.String())
+	re := regexp.MustCompile(`"id":[0-9]+`)
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 3)
+	}
+}
+
+// Running offsets have to land on the same columns as measuring each match
+// from the start: non-ASCII text before and between matches is where a
+// byte/rune mix-up would show.
+func TestFindRegexMarksRunningColumns(t *testing.T) {
+	lines := linesOf("ñ=ab → ab ✓ab")
+	re := regexp.MustCompile("ab")
+	got, _ := FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 0)
+	want := []Span{{Start: 3, End: 4}, {Start: 8, End: 9}, {Start: 12, End: 13}}
+	if !reflect.DeepEqual(got[0][1], want) {
+		t.Errorf("spans = %v, want %v", got[0][1], want)
+	}
+}
+
+// Matches counts the whole input; the positions of the kept ones are what
+// lets the caller say how many a trimmed view actually shows.
+func TestMarkStatsKept(t *testing.T) {
+	req := linesOf("GET /a?t=abc HTTP/1.1", "Host: x")
+	res := linesOf("HTTP/1.1 200", "abc abc", "abc-3")
+	_, stats := FindMarks([][]LineTokens{req, res}, []string{"abc"}, 3)
+	st := stats[0]
+	if len(st.Kept) != 3 || st.Matches != 4 || st.Dropped != 1 {
+		t.Fatalf("stats = %+v, want 3 kept of 4", st)
+	}
+	if got := st.KeptLines(0); !reflect.DeepEqual(got, []int{1}) {
+		t.Errorf("request lines = %v, want [1]", got)
+	}
+	if got := st.KeptLines(1); !reflect.DeepEqual(got, []int{2, 2}) {
+		t.Errorf("response lines = %v, want [2 2] (one per occurrence)", got)
+	}
+
+	_, rstats := FindRegexMarks([][]LineTokens{res}, []*regexp.Regexp{regexp.MustCompile("abc")}, 0)
+	if got := rstats[0].KeptLines(0); !reflect.DeepEqual(got, []int{2, 2, 3}) {
+		t.Errorf("regex kept lines = %v, want [2 2 3]", got)
+	}
+}
+
+// A needle with bytes that are not UTF-8 cannot match the drawn text, which is
+// all valid runes. It must count as no match — not match inside "é", and not
+// panic compiling the pattern a tab needle becomes.
+func TestFindMarksInvalidNeedle(t *testing.T) {
+	lines := linesOf("café\tx")
+	_, stats := FindMarks([][]LineTokens{lines}, []string{"\xa9", "\xa9\tx"}, 0)
+	for _, st := range stats {
+		if st.Matches != 0 {
+			t.Errorf("needle %q matched %d times, want none", st.Literal, st.Matches)
+		}
 	}
 }

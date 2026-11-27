@@ -1,7 +1,9 @@
 package highlight
 
 import (
+	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -24,21 +26,19 @@ type LineTokens struct {
 
 // Tokenize tokenizes src and returns one LineTokens per source line.
 // lang may be empty for auto-detection. filename is used for extension-based detection.
+// Tabs stop every 4 columns, the VS Code default for code.
 func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, error) {
-	var lexer chroma.Lexer
-	if lang != "" {
-		lexer = lexers.Get(lang)
+	return TokenizeTabs(src, lang, filename, style, 4)
+}
+
+// TokenizeTabs is Tokenize with tab stops every tabWidth columns (<= 0 means
+// 4). A terminal transcript wants 8: that is where the terminal that printed
+// it put the stops, and a table it aligned has to stay aligned in the image.
+func TokenizeTabs(src, lang, filename string, style *chroma.Style, tabWidth int) ([]LineTokens, error) {
+	if tabWidth <= 0 {
+		tabWidth = 4
 	}
-	if lexer == nil && filename != "" {
-		lexer = lexers.Match(filename)
-	}
-	if lexer == nil {
-		lexer = lexers.Analyse(src)
-	}
-	if lexer == nil {
-		lexer = lexers.Fallback
-	}
-	lexer = chroma.Coalesce(lexer)
+	lexer := chroma.Coalesce(pickLexer(src, lang, filename))
 
 	if style == nil {
 		style = styles.Get("monokai")
@@ -52,20 +52,18 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 		return nil, err
 	}
 
+	fr, fg, fb := defaultText(style)
+
 	var lines []LineTokens
 	current := LineTokens{LineNum: 1}
+	col := 0 // runes drawn so far on the current line, for tab stops
 
 	for tok := it(); tok != chroma.EOF; tok = it() {
-		text := expandTabs(tok.Value, 4)
+		text := tok.Value
 		entry := style.Get(tok.Type)
-		r, g, b := colorToRGB(entry.Colour)
-		// Use default text color if no color set
-		if entry.Colour == 0 {
-			defEntry := style.Get(chroma.Text)
-			r, g, b = colorToRGB(defEntry.Colour)
-			if r == 0 && g == 0 && b == 0 {
-				r, g, b = 0xd4, 0xd4, 0xd4 // VS Code default text
-			}
+		r, g, b := fr, fg, fb
+		if entry.Colour.IsSet() {
+			r, g, b = entry.Colour.Red(), entry.Colour.Green(), entry.Colour.Blue()
 		}
 
 		parts := strings.Split(text, "\n")
@@ -73,10 +71,12 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 			if i > 0 {
 				lines = append(lines, current)
 				current = LineTokens{LineNum: current.LineNum + 1}
+				col = 0
 			}
 			// A CRLF capture leaves \r on every part: it draws as a blank
 			// glyph that pads the row and inflates the column count.
 			part = strings.TrimSuffix(part, "\r")
+			part, col = expandTabs(part, col, tabWidth)
 			if part != "" {
 				current.Tokens = append(current.Tokens, Token{Text: part, R: r, G: g, B: b})
 			}
@@ -94,8 +94,69 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 	return lines, nil
 }
 
-// Text is the plain text of the line, with tabs already expanded, so column
-// numbers taken from it line up with what gets drawn.
+// pickLexer chooses the lexer: an explicit language, then the filename, then
+// content analysis, then plain text. A language chroma does not know falls
+// through to the next step without a word — KnownLang is how a caller finds
+// out.
+func pickLexer(src, lang, filename string) chroma.Lexer {
+	var lexer chroma.Lexer
+	if lang != "" {
+		lexer = lexers.Get(lang)
+	}
+	if lexer == nil && filename != "" {
+		lexer = lexers.Match(filename)
+	}
+	if lexer == nil {
+		lexer = lexers.Analyse(src)
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	return lexer
+}
+
+// KnownLang reports whether name is a language chroma can highlight. Tokenize
+// treats an unknown --lang as absent, so "pyhton" quietly becomes whatever the
+// filename or content analysis guesses — on stdin, often plain text. The CLI
+// needs this to say so instead of handing back an unhighlighted image.
+func KnownLang(name string) bool {
+	return name != "" && lexers.Get(name) != nil
+}
+
+// LexerName is the name of the lexer Tokenize would use for the same
+// arguments, so a warning about an unknown --lang can say what was used
+// instead.
+func LexerName(src, lang, filename string) string {
+	return pickLexer(src, lang, filename).Config().Name
+}
+
+// InvalidUTF8 counts the bytes of src that are not valid UTF-8, and the
+// 1-based line of the first one (0 when there are none). chroma lexes runes, so
+// each such byte becomes U+FFFD before a token exists; U+FFFD has a glyph, so
+// nothing downstream notices that the image cannot show what the byte was, and
+// a --mark or --redact needle holding those bytes can never match. The CLI
+// uses this to say so. Rendering is unchanged: the source hash keeps the raw
+// bytes for provenance.
+func InvalidUTF8(src string) (count, firstLine int) {
+	line := 1
+	for i := 0; i < len(src); {
+		r, size := utf8.DecodeRuneInString(src[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			count++
+			if firstLine == 0 {
+				firstLine = line
+			}
+		case r == '\n':
+			line++
+		}
+		i += size
+	}
+	return count, firstLine
+}
+
+// Text is the plain text of the line, with tabs already expanded to their tab
+// stops, so column numbers taken from it line up with what gets drawn.
 func (lt LineTokens) Text() string {
 	var b strings.Builder
 	for _, tok := range lt.Tokens {
@@ -110,22 +171,32 @@ func (lt LineTokens) Text() string {
 // "7:63-85" is error-prone, whereas pasting the secret you just found is the
 // thing an analyst already has in the clipboard.
 func FindLiteral(lines []LineTokens, needle string) Marks {
-	if needle == "" {
+	// The drawn text is valid UTF-8 (chroma lexes runes), so a needle that is
+	// not can never match a whole character — but its stray bytes could match
+	// inside one, and the columns counted from there would be wrong.
+	if needle == "" || !utf8.ValidString(needle) {
 		return nil
 	}
-	want := []rune(needle)
+	n := utf8.RuneCountInString(needle)
 	found := Marks{}
 	for _, lt := range lines {
 		if lt.IsGap {
 			continue
 		}
-		text := []rune(lt.Text())
-		for i := 0; i+len(want) <= len(text); i++ {
-			if string(text[i:i+len(want)]) != needle {
-				continue
+		// strings.Index finds the bytes; columns are runes, so the count is
+		// carried from one match to the next instead of converting the line
+		// and comparing a fresh string at every position.
+		text := lt.Text()
+		off, col := 0, 0
+		for {
+			j := strings.Index(text[off:], needle)
+			if j < 0 {
+				break
 			}
-			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: i + 1, End: i + len(want)})
-			i += len(want) - 1
+			col += utf8.RuneCountInString(text[off : off+j])
+			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: col + 1, End: col + n})
+			col += n
+			off += j + len(needle)
 		}
 	}
 	if len(found) == 0 {
@@ -134,9 +205,14 @@ func FindLiteral(lines []LineTokens, needle string) Marks {
 	return found
 }
 
-// Merge returns the union of m and other. Neither input is modified: RenderHTTP
-// merges literal matches into the caller's highlight map, and a render must not
-// leave the config it was handed different from how it found it.
+// Merge returns the union of m and other. Neither input is modified:
+// RenderHTTP merges literal matches into the caller's highlight map, and a
+// render must not leave the config it was handed different from how it found
+// it.
+//
+// Spans are appended, not unioned: redaction marks go through here too, and
+// the report counts one box per redact needle and fragment. Normalize is the
+// step for highlight marks.
 func (m Marks) Merge(other Marks) Marks {
 	if len(other) == 0 {
 		return m
@@ -149,6 +225,56 @@ func (m Marks) Merge(other Marks) Marks {
 		out[line] = append(out[line], spans...)
 	}
 	return out
+}
+
+// Normalize returns a copy of m whose column spans on each line are sorted and
+// unioned where they overlap or touch. Two needles that hit the same secret
+// ("sk_live" and "sk_live_abcdef") otherwise reach the renderer as nested
+// boxes whose inner border splits one value into what reads as two. A
+// whole-line span is kept as is, once. m is not modified.
+//
+// It is meant for highlight marks just before they are drawn. MarkStats are
+// counted before any merge, so the reported match counts do not change.
+func (m Marks) Normalize() Marks {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(Marks, len(m))
+	for line, spans := range m {
+		out[line] = append([]Span(nil), spans...)
+	}
+	return out.normalizeInPlace()
+}
+
+// normalizeInPlace does Normalize's work on a map whose span slices it owns.
+func (m Marks) normalizeInPlace() Marks {
+	for line, spans := range m {
+		if len(spans) < 2 {
+			continue
+		}
+		sort.Slice(spans, func(i, j int) bool {
+			if spans[i].Start != spans[j].Start {
+				return spans[i].Start < spans[j].Start
+			}
+			return spans[i].End < spans[j].End
+		})
+		out := spans[:0]
+		for _, sp := range spans {
+			if len(out) > 0 {
+				last := &out[len(out)-1]
+				if sp.WholeLine() && last.WholeLine() {
+					continue
+				}
+				if !sp.WholeLine() && !last.WholeLine() && sp.Start <= last.End+1 {
+					last.End = max(last.End, sp.End)
+					continue
+				}
+			}
+			out = append(out, sp)
+		}
+		m[line] = out
+	}
+	return m
 }
 
 // FilterLines applies a LineSpec (with gap sentinels) to the full tokenized lines.
@@ -189,13 +315,42 @@ func FilterLines(all []LineTokens, spec []int) []LineTokens {
 	return result
 }
 
-func expandTabs(s string, tabWidth int) string {
-	return strings.ReplaceAll(s, "\t", strings.Repeat(" ", tabWidth))
+// expandTabs replaces each tab in s, which starts at column col of its line,
+// with spaces up to the next multiple of tabWidth, and returns the column after
+// it. The column is counted in runes, the unit spans and the renderer use; a
+// fixed run of spaces instead pushed "#define XY\t333" and "#define A\t1" to
+// different columns although every editor aligns them.
+func expandTabs(s string, col, tabWidth int) (string, int) {
+	if !strings.Contains(s, "\t") {
+		return s, col + utf8.RuneCountInString(s)
+	}
+	var b strings.Builder
+	b.Grow(len(s) + tabWidth)
+	for _, r := range s {
+		if r == '\t' {
+			n := tabWidth - col%tabWidth
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String(), col
 }
 
-func colorToRGB(c chroma.Colour) (r, g, b uint8) {
-	if c == 0 {
-		return 0, 0, 0
+// defaultText is the colour for a token the style leaves uncoloured. Style.Get
+// already inherits the style's Text entry, so this only runs for styles that
+// set no text colour at all — chroma's light "github" among them. The VS Code
+// dark default on its white background drew plain-text evidence (snap of a
+// .txt, every term and exec transcript) light grey on white, so the fallback
+// follows the background: GitHub's own foreground on a light one.
+func defaultText(style *chroma.Style) (r, g, b uint8) {
+	if c := style.Get(chroma.Text).Colour; c.IsSet() {
+		return c.Red(), c.Green(), c.Blue()
 	}
-	return c.Red(), c.Green(), c.Blue()
+	if bg := style.Get(chroma.Background).Background; bg.IsSet() && bg.Brightness() > 0.5 {
+		return 0x1f, 0x23, 0x28 // GitHub's default foreground
+	}
+	return 0xd4, 0xd4, 0xd4 // VS Code default text
 }
