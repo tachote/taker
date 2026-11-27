@@ -8,6 +8,7 @@ import (
 	"image"
 	"io"
 	"io/fs"
+	"math"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -90,7 +91,7 @@ type HTTPCmd struct {
 type ExecCmd struct {
 	Args       []string `arg:"" name:"command" passthrough:"" optional:"" help:"Command to run. Put it after -- so its flags stay its own."`
 	Shell      string   `name:"sh" help:"Run this command line through sh -c (for pipes and quoting)."`
-	Timeout    int      `name:"timeout" default:"15" help:"Seconds before the command is killed (minimum 1)."`
+	Timeout    int      `name:"timeout" default:"15" help:"Seconds before the command is killed (1 to 9223372036)."`
 	Output     string   `short:"o" default:"output.png" help:"Output PNG file path."`
 	Label      string   `short:"L" help:"Caption strip stating what the image proves."`
 	Mark       []string `short:"m" sep:"none" help:"Highlight every occurrence of this text; a comma is part of it. Repeat -m for more."`
@@ -1767,6 +1768,9 @@ func ownArgs(argv, passthrough []string) []string {
 	return argv
 }
 
+// maxTimeout is the largest --timeout, in seconds, that time.Duration holds.
+const maxTimeout = math.MaxInt64 / int64(time.Second)
+
 func runExec(cmd *ExecCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
 	if code := validateRedact(rep, ownArgs(os.Args[1:], cmd.Args), cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
@@ -1786,8 +1790,10 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	// Zero used to kill the command before it printed anything and render
 	// the empty frame as "killed after 0s" — an image of nothing that looks
 	// like evidence of something.
-	if cmd.Timeout < 1 {
-		return rep.fail(exitUsage, kindUsage, "--timeout must be at least 1 second, got %d", cmd.Timeout)
+	// A value past maxTimeout overflows time.Duration: the deadline went
+	// negative, fired at once, and drew the same empty "killed after Ns".
+	if cmd.Timeout < 1 || int64(cmd.Timeout) > maxTimeout {
+		return rep.fail(exitUsage, kindUsage, "--timeout must be between 1 and %d seconds, got %d", maxTimeout, cmd.Timeout)
 	}
 	theme, err := resolveTheme(cmd.Theme, "a transcript")
 	if err != nil {

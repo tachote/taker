@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -272,15 +273,21 @@ func TestExecTimeoutKills(t *testing.T) {
 }
 
 // --timeout 0 killed the command before it printed and drew the empty frame
-// as "killed after 0s".
+// as "killed after 0s". A value past what time.Duration holds wrapped
+// negative and did the same.
 func TestExecTimeoutMustBePositive(t *testing.T) {
-	for _, n := range []int{0, -1} {
+	ns := []int{0, -1}
+	if strconv.IntSize == 64 {
+		over := maxTimeout + 1 // a variable: the conversion must not be a constant on 32-bit
+		ns = append(ns, int(over), int(2*over), int(over*10))
+	}
+	for _, n := range ns {
 		code, rep, _ := runJSON(t, func(r *reporter) int {
 			c := execCmd(ExecCmd{Args: []string{"echo", "hi"}, Output: filepath.Join(t.TempDir(), "o.png")})
 			c.Timeout = n
 			return runExec(c, r)
 		})
-		if code != exitUsage || rep.Error == nil || !strings.Contains(rep.Error.Message, "--timeout must be at least 1") {
+		if code != exitUsage || rep.Error == nil || !strings.Contains(rep.Error.Message, "--timeout must be between 1 and") {
 			t.Errorf("--timeout %d = %d %+v, want a usage error", n, code, rep.Error)
 		}
 	}

@@ -309,7 +309,7 @@ The prompt line is the argv shell-quoted, so it pastes back as the same command 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--sh` | | — | Run the string through `sh -c` (pipes, redirections, quoting); mutually exclusive with a command after `--` |
-| `--timeout` | | 15 | Kill the command after this many seconds (minimum 1) |
+| `--timeout` | | 15 | Kill the command after this many seconds (1 to 9223372036) |
 | `--output` | `-o` | `output.png` | Output PNG path |
 | `--label` | `-L` | — | Caption stating what the image proves |
 | `--mark` | `-m` | — | Highlight every occurrence of this text in the output; a comma is part of it. Repeat `-m` for more |
