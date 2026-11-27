@@ -168,6 +168,10 @@ type reporter struct {
 	// name — a token caught by the regex in a filename only stays hidden if
 	// the pattern itself scrubs the strings it touches.
 	secretRes []*regexp.Regexp
+	// argv is the raw command line, when main knows it. Command is rebuilt
+	// from it on every scrub — each word masked before it is quoted — so a
+	// secret that holds a quote cannot hide from the scrub behind the quoting.
+	argv []string
 	// fragOnly holds the needles' separator-split components — for the pixel
 	// redaction, so a needle spliced by quotes or escapes leaves no readable
 	// fragment behind. The image masks them only as whole tokens (see
@@ -378,7 +382,11 @@ func (m *scrubMatcher) matchLen(s string, i int) int {
 // Warnings and help are scrubbed at format time, so they never carry the
 // literal regardless of ordering.
 func (r *reporter) scrubSecrets() {
-	r.rep.Command = r.scrubMeta(r.rep.Command)
+	if r.argv != nil {
+		r.rep.Command = r.commandLine()
+	} else {
+		r.rep.Command = r.scrubMeta(r.rep.Command)
+	}
 	if r.rep.Source != nil {
 		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
 	}
@@ -408,6 +416,95 @@ func (r *reporter) scrubSecrets() {
 func (r *reporter) scrubMeta(v string) string {
 	b, _ := stripANSI([]byte(v))
 	return scrubRedactArgs(r.scrub(string(b)))
+}
+
+// commandLine is the recorded invocation: the program's base name, then each
+// argument masked and shell-quoted. Words joined with bare spaces lost their
+// quoting — `-L "two words"` came back as two arguments — and the record must
+// replay what ran. The base name, not argv[0] as typed: an absolute path to
+// the binary leaks the analyst's filesystem into every image, the same leak
+// the snap title already trims, and it says nothing about what ran.
+func (r *reporter) commandLine() string {
+	if len(r.argv) == 0 {
+		return ""
+	}
+	argv := slices.Clone(r.argv)
+	argv[0] = filepath.Base(argv[0])
+	return r.quoteScrubbed(argv)
+}
+
+// quoteScrubbed masks each word, then quotes it, then masks the line. Word
+// first: quoting escapes a ' or a $, which splits a needle that holds one,
+// and the line-level scrub would no longer see it. The line pass still
+// catches a needle that spans two words.
+func (r *reporter) quoteScrubbed(args []string) string {
+	words := make([]string, len(args))
+	for i, a := range args {
+		b, _ := stripANSI([]byte(a))
+		words[i] = r.scrub(string(b))
+	}
+	for i, w := range words {
+		words[i] = quoteWord(w, true)
+	}
+	return r.scrubMeta(strings.Join(words, " "))
+}
+
+// shellQuote joins argv into one POSIX shell line that splits back into the
+// same words.
+func shellQuote(args []string) string {
+	words := make([]string, len(args))
+	for i, a := range args {
+		words[i] = quoteWord(a, false)
+	}
+	return strings.Join(words, " ")
+}
+
+// quoteWord quotes one word only when it needs it, so a plain command still
+// reads as typed. A word with no ' goes in single quotes, where nothing is
+// special. A word with a ' goes in double quotes, escaping only " $ ` and \:
+// closing the quote around an escaped ' splits a needle such as it's-s3cret
+// in the prompt line, and the image could no longer find it to black it out.
+// A ! forces that form after all, because an interactive bash expands !
+// inside double quotes. With masked set, the <redacted> marker counts as
+// plain: a masked word replays nothing either way, and quoting the marker
+// only adds noise.
+func quoteWord(s string, masked bool) string {
+	if s == "" {
+		return "''"
+	}
+	plain := s
+	if masked {
+		plain = strings.ReplaceAll(s, "<redacted>", "")
+	}
+	if !strings.ContainsFunc(plain, needsQuote) {
+		return s
+	}
+	switch {
+	case !strings.Contains(s, "'"):
+		return "'" + s + "'"
+	case !strings.Contains(s, "!"):
+		var b strings.Builder
+		b.WriteByte('"')
+		for _, c := range s {
+			if strings.ContainsRune("\"$`\\", c) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(c)
+		}
+		b.WriteByte('"')
+		return b.String()
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// needsQuote is any character outside the set a POSIX shell reads literally
+// in a bare word.
+func needsQuote(c rune) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return false
+	}
+	return !strings.ContainsRune("_@%+=:,./-", c)
 }
 
 // pngMeta is the metadata the PNG carries beyond version, time and command:

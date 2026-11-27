@@ -457,7 +457,8 @@ in `taker http` — an absent pane is `null`, not a zero crop. `marks` reports, 
 literal or pattern, how many matches were boxed (`kept`) and how many a limit left
 out (`dropped`). `sha256` fingerprints every input that fed the image (`source`,
 `request`, `response`, `transcript`), and `command`/`generated` record the exact
-invocation and its UTC time — the same provenance the PNG itself embeds as `tEXt`
+invocation (shell-quoted so it replays, with the binary's base name instead of
+its path) and its UTC time — the same provenance the PNG itself embeds as `tEXt`
 chunks (`taker:sha256`, `taker:command`, `taker:generated`, `taker:version`), so an
 image that travels without the report still describes itself — with one
 exception: every `--redact` literal is replaced by `<redacted>` in `command`

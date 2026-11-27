@@ -210,7 +210,7 @@ func main() {
 			}
 		}
 		rep := newReporter(format, mode)
-		rep.rep.Command = strings.Join(os.Args, " ")
+		rep.argv = os.Args
 		rep.secrets = argvNeedleValues(os.Args[1:])
 		hint := "taker --help"
 		if mode != "snap" {
@@ -240,8 +240,9 @@ func main() {
 	rep := newReporter(formatOf(jsonOut, toonOut), mode)
 	// The exact argv is provenance: the report carries it and the PNG embeds
 	// it, so the image cannot be claimed to come from a simpler command than
-	// ran.
-	rep.rep.Command = strings.Join(os.Args, " ")
+	// ran. It is recorded shell-quoted, so it replays (see commandLine).
+	rep.argv = os.Args
+	rep.scrubSecrets()
 	// Parse succeeded, so the needles are already known — register them before
 	// any failure path below can echo the command.
 	var redactLits, redactRes []string
@@ -1263,6 +1264,34 @@ var execFlagNames = sync.OnceValue(func() map[string]bool {
 	return names
 })
 
+// splitNeedle names a redact needle that the prompt line's quoting breaks
+// apart: one the raw words hold but the quoted line does not. The image finds
+// needles in the drawn text, so a split needle would be drawn in clear —
+// it's$ecret quoted as "it's\$ecret". The quoting rule keeps this to a
+// needle that holds both a ' and one of " $ ` \ !.
+func splitNeedle(raw, quoted string, lits []string, res, frags []*regexp.Regexp) string {
+	for i, l := range lits {
+		if l != "" && strings.Contains(raw, l) && !strings.Contains(quoted, l) {
+			return fmt.Sprintf("--redact #%d", i+1)
+		}
+	}
+	for i, re := range res {
+		for _, m := range re.FindAllString(raw, -1) {
+			if m != "" && !strings.Contains(quoted, m) {
+				return fmt.Sprintf("--redact-re #%d", i+1)
+			}
+		}
+	}
+	for _, re := range frags {
+		for _, m := range re.FindAllString(raw, -1) {
+			if !strings.Contains(quoted, m) {
+				return "a part of a --redact value"
+			}
+		}
+	}
+	return ""
+}
+
 // stdinHasData reports whether at least one byte is readable within the
 // grace period. A real producer — cat file | taker — has data in the pipe
 // buffer before the process even starts; a harness that opened stdin and
@@ -1335,7 +1364,10 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	cmd.WrapWidth = clampWrapWidth(cmd.WrapWidth, false, rep)
 
 	var argv []string
-	var cmdStr string
+	// cmdStr is the prompt line the image draws, needles still in place for
+	// the black boxes; provStr is the same line masked, for every text
+	// channel. Each word is masked before it is quoted (see quoteScrubbed).
+	var cmdStr, provStr string
 	switch {
 	case cmd.Shell != "" && len(cmd.Args) > 0:
 		rep.helpf("drop one: --sh '<pipeline>' or a command after --")
@@ -1384,9 +1416,22 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 			rep.helpf("taker exec -- id")
 			return rep.fail(exitUsage, kindUsage, "no command: taker exec -- <command> or taker exec --sh '<pipeline>'")
 		}
-		cmdStr = strings.Join(argv, " ")
+		// The prompt line is the record of what ran, so it is quoted the way
+		// a shell would need it: words joined with bare spaces showed
+		// `grep -c func main a.go` for a search of "func main", a different
+		// command than the one that ran.
+		cmdStr = shellQuote(argv)
+		if what := splitNeedle(strings.Join(argv, " "), cmdStr, cmd.Redact, redactRe, rep.redactFragRes(cmd.RedactKeep)); what != "" {
+			rep.helpf("taker exec --sh '<command line>' shows the line as typed")
+			return rep.fail(exitUsage, kindUsage,
+				"quoting the prompt line splits %s, so the image could not hide it", what)
+		}
+		provStr = rep.quoteScrubbed(argv)
 	}
-	rep.note("$ %s", cmdStr)
+	if provStr == "" {
+		provStr = rep.scrubMeta(cmdStr)
+	}
+	rep.note("$ %s", provStr)
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cmd.Timeout)*time.Second)
 	defer cancel()
@@ -1423,7 +1468,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 		var exitErr *exec.ExitError
 		if !errors.As(runErr, &exitErr) {
 			rep.helpf("check that the command exists on PATH and its argv is valid")
-			return rep.fail(exitInput, kindInput, "run %q: %v", cmdStr, runErr)
+			return rep.fail(exitInput, kindInput, "run %q: %v", provStr, runErr)
 		}
 		status = fmt.Sprintf("exit %d", exitErr.ExitCode())
 		code := exitErr.ExitCode()
@@ -1461,8 +1506,8 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	// do: the raw transcript still holds an ANSI-spliced secret in clear, and
 	// its sum would confirm guesses at it.
 	rep.addInput("transcript", stripped)
-	rep.metaKV = append(rep.metaKV, [2]string{"taker:exec", cmdStr})
-	rep.rep.Source = &Source{Kind: "exec", Path: cmdStr}
+	rep.metaKV = append(rep.metaKV, [2]string{"taker:exec", provStr})
+	rep.rep.Source = &Source{Kind: "exec", Path: provStr}
 	rep.scrubSecrets()
 
 	redactM, code := termRedact(lines, cmd.Redact, redactRe, rep.redactFragRes(cmd.RedactKeep), cmd.RedactKeep, rep)
