@@ -197,3 +197,26 @@ func TestTermMissingFileIsInputError(t *testing.T) {
 		t.Errorf("missing transcript = %d %+v, want an input error", code, rep.Error)
 	}
 }
+
+// A terminal sets tab stops every 8 columns, so a table ls or ps aligned
+// there must stay aligned in the image. Snap's 4 shifted every column.
+func TestTranscriptTabsStopEvery8(t *testing.T) {
+	theme, err := resolveTheme("vscode-dark")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, err := tokenizeTranscript("ab\tc\n12345678\td\n", "", theme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ab      c", "12345678        d"}
+	for i, l := range lines {
+		var b strings.Builder
+		for _, tok := range l.Tokens {
+			b.WriteString(tok.Text)
+		}
+		if b.String() != want[i] {
+			t.Errorf("line %d = %q, want %q", i+1, b.String(), want[i])
+		}
+	}
+}

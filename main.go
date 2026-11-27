@@ -1160,6 +1160,18 @@ func termRedact(lines []highlight.LineTokens, needles []string, res, frags []*re
 	return kept, 0
 }
 
+// terminalTabWidth is where a terminal puts its tab stops. The output of ls,
+// ps or a tab-separated table was aligned by the terminal that printed it,
+// on stops 8 columns apart; drawn on snap's 4 the columns no longer line up
+// with what the analyst saw.
+const terminalTabWidth = 8
+
+// tokenizeTranscript is the one tokenizer exec and term share, so the two
+// renders of the same session cannot drift apart.
+func tokenizeTranscript(src, filename string, theme *render.Theme) ([]highlight.LineTokens, error) {
+	return highlight.TokenizeTabs(src, "text", filename, theme.Chroma, terminalTabWidth)
+}
+
 // terminalRun gathers what a terminal-mode render needs; exec and term differ
 // only in where the lines come from.
 type terminalRun struct {
@@ -1388,7 +1400,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	if nANSI > 0 {
 		rep.warn("stripped %d ANSI escape sequences from the transcript", nANSI)
 	}
-	lines, err := highlight.Tokenize(string(stripped), "text", "", theme.Chroma)
+	lines, err := tokenizeTranscript(string(stripped), "", theme)
 	if err != nil {
 		return rep.fail(exitRefused, kindRefused, "tokenize transcript: %v", err)
 	}
@@ -1474,7 +1486,7 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	if nANSI > 0 {
 		rep.warn("stripped %d ANSI escape sequences from the transcript", nANSI)
 	}
-	lines, err := highlight.Tokenize(string(stripped), "text", cmd.File, theme.Chroma)
+	lines, err := tokenizeTranscript(string(stripped), cmd.File, theme)
 	if err != nil {
 		return rep.fail(exitRefused, kindRefused, "tokenize transcript: %v", err)
 	}
