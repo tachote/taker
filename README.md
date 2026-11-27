@@ -88,7 +88,7 @@ taker [file] [flags]
 | `--lang` | `-l` | auto | Language for syntax highlighting |
 | `--lines` | `-n` | all | Lines to include, e.g. `1,5,10-20` |
 | `--first-line` | | 1 | Line number of the input's first line (use it when piping an excerpt) |
-| `--git` | | — | Render `<rev>:<path>` out of the repository, e.g. `HEAD:src/auth/login.py` |
+| `--git` | | — | Render the file `<rev>:<path>` out of the repository, e.g. `HEAD:src/auth/login.py` — the committed bytes, no textconv; a directory is refused (exit 3), a value without `<rev>:<path>` is a usage error (exit 2) |
 | `--repo-dir` | | `.` | Repository directory for `--git` |
 | `--highlight` | `-H` | — | Regions to highlight in red: `15`, `13,15`, `10-20`, or `15:20-45` for columns |
 | `--mark` | `-m` | — | Highlight every occurrence of this text; a comma is part of it. Repeat `-m` for more |

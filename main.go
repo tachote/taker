@@ -366,6 +366,10 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 			src = normalizeInput(src, rep)
 		}
 	}
+	if errors.Is(err, errGitUsage) {
+		rep.helpf("taker snap --git HEAD:path/to/file.py -o out.png")
+		return rep.fail(exitUsage, kindUsage, "%v", err)
+	}
 	if err != nil {
 		return rep.fail(exitInput, kindInput, "%v", err)
 	}
@@ -1855,34 +1859,49 @@ type sourceInfo struct {
 	Rev  string
 }
 
-// readGitBlob reads <rev>:<path> out of the repository in the working directory.
+// errGitUsage marks a --git value that is malformed — the caller's mistake,
+// exit 2 — as opposed to a well-formed spec git cannot resolve (exit 3).
+var errGitUsage = errors.New("--git takes <rev>:<path>")
+
+// readGitBlobIn reads <rev>:<path> out of the repository in dir ("" for the
+// working directory; a test points it at a throwaway repo).
 //
 // It exists to delete a class of error rather than to detect it: evidence has to
 // show the code of the revision being reported, and a snippet copied out of an
 // editor is a transcription that nothing can check. Rendering from the object
 // store means there is nothing to transcribe.
-func readGitBlob(spec string) ([]byte, sourceInfo, error) {
-	return readGitBlobIn("", spec)
-}
-
-// readGitBlobIn takes the repository directory so a test can point it at a
-// throwaway repo instead of changing the process's working directory.
 func readGitBlobIn(dir, spec string) ([]byte, sourceInfo, error) {
 	rev, path, ok := strings.Cut(spec, ":")
 	if !ok || rev == "" || path == "" {
-		return nil, sourceInfo{}, fmt.Errorf("--git takes <rev>:<path>, for example HEAD:src/auth/login.py")
+		return nil, sourceInfo{}, fmt.Errorf("%w, for example HEAD:src/auth/login.py", errGitUsage)
 	}
 	// The spec travels inside one argument ("rev:path"), so a revision that
 	// starts with '-' is handed to git as a flag — and git has flags like
 	// --output that write files.
 	if strings.HasPrefix(rev, "-") {
-		return nil, sourceInfo{}, fmt.Errorf("--git %s: revision must not start with '-'", spec)
+		return nil, sourceInfo{}, fmt.Errorf("%w; the revision in %q must not start with '-'", errGitUsage, spec)
 	}
 	sha, err := gitOut(dir, "rev-parse", rev+"^{commit}")
 	if err != nil {
 		return nil, sourceInfo{}, fmt.Errorf("--git %s: %w", spec, err)
 	}
-	out, err := gitOut(dir, "show", rev+":"+path)
+	// Only a blob is a file. `git show` prints a directory's tree listing
+	// (and a submodule's commit) as if it were content, which rendered a file
+	// that does not exist, named after the directory, at exit 0.
+	typ, err := gitOut(dir, "cat-file", "-t", rev+":"+path)
+	if err != nil {
+		return nil, sourceInfo{}, fmt.Errorf("--git %s: %w", spec, err)
+	}
+	switch typ = strings.TrimSpace(typ); typ {
+	case "blob":
+	case "tree":
+		return nil, sourceInfo{}, fmt.Errorf("--git %s is a tree (directory), not a file", spec)
+	default:
+		return nil, sourceInfo{}, fmt.Errorf("--git %s is a %s, not a file", spec, typ)
+	}
+	// cat-file returns the committed bytes: no textconv, no filters — the
+	// revision exactly as the hash names it.
+	out, err := gitOut(dir, "cat-file", "blob", rev+":"+path)
 	if err != nil {
 		return nil, sourceInfo{}, fmt.Errorf("--git %s: %w", spec, err)
 	}
