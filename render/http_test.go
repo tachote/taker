@@ -645,3 +645,132 @@ func TestExtendDownMatchesMinHeight(t *testing.T) {
 		t.Fatal("extendDown differs from Render with MinHeight")
 	}
 }
+
+// colourHTTP runs a message through the same two passes RenderHTTP does.
+func colourHTTP(t *testing.T, msg string) []highlight.LineTokens {
+	t.Helper()
+	lines, _, err := tokenizeHTTP(msg, BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return burpColourMessage(lines)
+}
+
+// hasToken reports whether line (1-based) holds a token with exactly this text
+// in this colour.
+func hasToken(lines []highlight.LineTokens, line int, text string, c color.NRGBA) bool {
+	if line < 1 || line > len(lines) {
+		return false
+	}
+	for _, tok := range lines[line-1].Tokens {
+		if tok.Text == text && (color.NRGBA{tok.R, tok.G, tok.B, 0xff}) == c {
+			return true
+		}
+	}
+	return false
+}
+
+// chroma's http lexer gives up on the first line it does not know — an HTTP/2
+// pseudo header, a WebDAV verb, a header with an empty value — and everything
+// after it, the body included, comes out as one flat run. The header lines hide
+// that because they are repainted anyway; the body is where the evidence is.
+func TestBodyColouredWhenHTTPLexerRejectsALine(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		line int
+		key  string
+	}{
+		{"http2 post", ":method: POST\n:path: /api/users\n:authority: a.test\ncontent-type: application/json\n\n" +
+			`{"role":"admin","id":7}` + "\n", 6, `"role"`},
+		{"webdav verb", "PROPFIND /dav HTTP/1.1\nHost: a\nContent-Type: application/xml\n\n<a>1</a>\n", 5, "<a>"},
+		{"empty header value", "POST /x HTTP/1.1\r\nHost: a\r\nX-Empty:\r\nContent-Type: application/json\r\n\r\n" +
+			`{"role":"admin"}`, 6, `"role"`},
+		{"structured suffix", "HTTP/1.1 200 OK\nContent-Type: application/problem+json\n\n" +
+			`{"title":"x"}`, 4, `"title"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := colourHTTP(t, tc.msg)
+			if len(got) != tc.line {
+				t.Fatalf("got %d lines, want %d: the line numbers must match the capture", len(got), tc.line)
+			}
+			if !hasToken(got, tc.line, tc.key, burpNameTag) {
+				t.Errorf("body key %q is not tag-coloured: %+v", tc.key, got[tc.line-1].Tokens)
+			}
+		})
+	}
+}
+
+// curl -i through a proxy prints the proxy's "200 Connection established"
+// block before the real response, and a large upload gets "100 Continue". The
+// real response's headers are still headers, and its body is typed by its own
+// Content-Type, not by the interim block's (which has none).
+func TestInterimStatusBlocks(t *testing.T) {
+	proxy := "HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 200\r\ncontent-type: application/json\r\n" +
+		"set-cookie: sid=XYZ; Path=/; HttpOnly\r\n\r\n" + `{"token":"secret","user":"admin"}` + "\r\n"
+	got := colourHTTP(t, proxy)
+	if len(got) != 7 {
+		t.Fatalf("got %d lines, want 7", len(got))
+	}
+	if toks := got[2].Tokens; len(toks) != 1 || toks[0].R != burpLineColour.R {
+		t.Errorf("final status line = %+v, want one line-coloured run", toks)
+	}
+	if !hasToken(got, 5, "set-cookie:", burpLineColour) || !hasToken(got, 5, "sid", burpParamName) {
+		t.Errorf("final headers painted as body: %+v", got[4].Tokens)
+	}
+	if !hasToken(got, 7, `"token"`, burpNameTag) {
+		t.Errorf("final body is not json-coloured: %+v", got[6].Tokens)
+	}
+
+	// 103 Early Hints carries headers of its own; the final block still wins.
+	cont := "HTTP/1.1 100 Continue\n\nHTTP/1.1 103 Early Hints\nLink: </a.css>; rel=preload\n\n" +
+		"HTTP/1.1 201 Created\nContent-Type: application/x-www-form-urlencoded\n\nid=7&owner=victim\n"
+	got = colourHTTP(t, cont)
+	if len(got) != 9 {
+		t.Fatalf("got %d lines, want 9", len(got))
+	}
+	if !hasToken(got, 4, "Link:", burpLineColour) {
+		t.Errorf("early-hints header not a header: %+v", got[3].Tokens)
+	}
+	if !hasToken(got, 7, "Content-Type:", burpLineColour) {
+		t.Errorf("final header not a header: %+v", got[6].Tokens)
+	}
+	if !hasToken(got, 9, "owner", burpParamName) {
+		t.Errorf("final form body not form-coloured: %+v", got[8].Tokens)
+	}
+
+	// A final response whose body happens to start with a status line is still
+	// body: only the interim shapes open a new header block.
+	echo := "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nHTTP/1.1 200 OK\nX-Inner: 1\n"
+	got = colourHTTP(t, echo)
+	if hasToken(got, 5, "X-Inner:", burpLineColour) {
+		t.Errorf("an echoed response in the body was painted as headers: %+v", got[4].Tokens)
+	}
+}
+
+// The status-line warning is about the status the image shows. After an
+// interim block, that is the final status line, not line 1.
+func TestStatusLineWarningAfterInterimBlock(t *testing.T) {
+	proxy := "HTTP/1.1 200 Connection established\n\nHTTP/2 200\ncontent-type: application/json\n\n{\"a\":1}\n"
+	for _, tc := range []struct {
+		spec string
+		warn bool
+	}{{"3-6", false}, {"4-6", true}, {"1-2,4-6", true}} {
+		spec, err := highlight.ParseLineSpec(tc.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var warned bool
+		_, err = RenderHTTP(&HTTPConfig{
+			Response: proxy, ResponseLines: spec,
+			Warn: func(m string) { warned = warned || strings.Contains(m, "status line") },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if warned != tc.warn {
+			t.Errorf("--ns %s: status-line warning = %v, want %v", tc.spec, warned, tc.warn)
+		}
+	}
+}

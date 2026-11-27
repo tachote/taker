@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
+
 	"github.com/tachote/taker/highlight"
 )
 
@@ -100,32 +103,139 @@ func (cfg *HTTPConfig) warnf(format string, args ...any) {
 // it needs the blank line that ends the header block to tell a header from a
 // body line.
 func burpColourMessage(lines []highlight.LineTokens) []highlight.LineTokens {
-	inHeaders := true
-	contentType := ""
+	texts := make([]string, len(lines))
+	for i, lt := range lines {
+		texts[i] = lt.Text()
+	}
+	layout := layoutHTTP(texts)
 	for i := range lines {
 		lt := &lines[i]
 		if lt.IsGap {
 			continue
 		}
-		text := lineText(*lt)
+		text := texts[i]
 		switch {
-		case inHeaders && isStartLine(text):
+		case i >= layout.body:
+			lt.Tokens = burpBodyTokens(text, lt.Tokens, layout.contentType)
+		case isStartLine(text):
 			// Request line or status line: one colour, no structure. Only a
 			// line inside the header block can be one — a body line like
 			// "GET /x HTTP/1.1" (a nested request, a pasted log) is body text.
 			lt.Tokens = []highlight.Token{colourToken(text, burpLineColour)}
-		case inHeaders && strings.TrimSpace(text) == "":
-			inHeaders = false // the separator between headers and body
-		case inHeaders:
-			if name, value, ok := splitHeader(text); ok && contentType == "" && isContentTypeHeader(name) {
-				contentType = strings.ToLower(strings.TrimSpace(value))
-			}
-			lt.Tokens = burpHeaderTokens(text)
+		case strings.TrimSpace(text) == "":
+			// The separator that closes a header block.
 		default:
-			lt.Tokens = burpBodyTokens(text, lt.Tokens, contentType)
+			lt.Tokens = burpHeaderTokens(text)
 		}
 	}
 	return lines
+}
+
+// httpLayout says where the parts of a message are, as 0-based line indexes.
+type httpLayout struct {
+	status      int    // first line of the final header block: the start line the image must show
+	body        int    // first body line; the line count when the message has no body
+	contentType string // the final block's Content-Type, lowercased, parameters kept
+}
+
+// interimStatusRe matches the status lines that announce another response
+// after them: 1xx (100 Continue, 103 Early Hints) and the 200 a proxy sends
+// back for CONNECT, which curl -i prints in front of the real response.
+var interimStatusRe = regexp.MustCompile(`(?i)^HTTP/[0-9](?:\.[0-9])? +(?:1[0-9]{2}\b|2[0-9]{2} +connection established)`)
+
+// statusLineRe is the start of a status line, for the line after an interim block.
+var statusLineRe = regexp.MustCompile(`^HTTP/[0-9]`)
+
+// layoutHTTP finds the header block, the body, and the Content-Type that
+// decides how the body is painted. An interim block followed by a status line
+// is not the end of the headers: the real response comes after it, and its
+// headers and body are typed by its own block. Only those two interim shapes
+// open a new block, so a final response whose body echoes "HTTP/1.1 200" (an
+// SSRF reading an internal service) keeps that echo as body.
+func layoutHTTP(lines []string) httpLayout {
+	start := 0
+	for {
+		l := httpLayout{status: start, body: len(lines)}
+		sep := -1
+		for i := start; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "" {
+				sep = i
+				break
+			}
+			if name, value, ok := splitHeader(lines[i]); ok && l.contentType == "" && isContentTypeHeader(name) {
+				l.contentType = strings.ToLower(strings.TrimSpace(value))
+			}
+		}
+		if sep < 0 {
+			return l
+		}
+		next := sep + 1
+		for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+			next++
+		}
+		if next < len(lines) && interimStatusRe.MatchString(lines[start]) && statusLineRe.MatchString(lines[next]) {
+			start = next
+			continue
+		}
+		l.body = sep + 1
+		return l
+	}
+}
+
+// tokenizeHTTP tokenizes a message in two parts. The header block is plain
+// text, because burpColourMessage repaints every line of it anyway. The body
+// gets the lexer its declared Content-Type names. Handing the whole message to
+// chroma's http lexer instead loses the body colours whenever that lexer
+// rejects one line before it — an HTTP/2 pseudo header, a WebDAV verb, a header
+// with an empty value — and the repainted headers hide that it happened.
+func tokenizeHTTP(msg string, style *chroma.Style) ([]highlight.LineTokens, httpLayout, error) {
+	// chroma turns CRLF and a lone CR into LF before it lexes. Doing it here
+	// first makes this split land on the same lines Tokenize numbers.
+	msg = strings.ReplaceAll(msg, "\r\n", "\n")
+	msg = strings.ReplaceAll(msg, "\r", "\n")
+	raw := strings.Split(msg, "\n")
+	layout := layoutHTTP(raw)
+
+	body := strings.Join(raw[layout.body:], "\n")
+	if body == "" {
+		lines, err := highlight.Tokenize(msg, "text", "", style)
+		return lines, layout, err
+	}
+	lines, err := highlight.Tokenize(strings.Join(raw[:layout.body], "\n"), "text", "", style)
+	if err != nil {
+		return nil, layout, err
+	}
+	// The block ends in its blank separator, which Tokenize reads as a
+	// trailing newline and drops. The body's line numbers depend on it.
+	for len(lines) < layout.body {
+		lines = append(lines, highlight.LineTokens{LineNum: len(lines) + 1})
+	}
+	bodyLines, err := highlight.Tokenize(body, bodyLexer(layout.contentType), "", style)
+	if err != nil {
+		return nil, layout, err
+	}
+	for i := range bodyLines {
+		bodyLines[i].LineNum += layout.body
+	}
+	return append(lines, bodyLines...), layout, nil
+}
+
+// bodyLexer names the lexer for a declared Content-Type, with the fallback
+// chroma's own http lexer uses: a structured suffix ("application/problem+json")
+// is read as its base type when the full type has no lexer of its own.
+func bodyLexer(contentType string) string {
+	mime, _, _ := strings.Cut(contentType, ";")
+	mime = strings.TrimSpace(mime)
+	lx := lexers.MatchMimeType(mime)
+	if slash, plus := strings.Index(mime, "/"), strings.LastIndex(mime, "+"); lx == nil && slash >= 0 && plus > slash {
+		lx = lexers.MatchMimeType(mime[:slash+1] + mime[plus+1:])
+	}
+	// Tokenize looks the lexer up by name. A name it cannot resolve would make
+	// it guess from the body's content, and a body without a known type is text.
+	if lx == nil || lexers.Get(lx.Config().Name) == nil {
+		return "text"
+	}
+	return lx.Config().Name
 }
 
 // isContentTypeHeader names the one header whose value decides how the body is
@@ -380,16 +490,17 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	}
 
 	var reqLines, resLines []highlight.LineTokens
+	var resLayout httpLayout
 	var err error
 	if hasReq {
-		reqLines, err = highlight.Tokenize(cfg.Request, "http", "request.http", theme.Chroma)
+		reqLines, _, err = tokenizeHTTP(cfg.Request, theme.Chroma)
 		if err != nil {
 			return nil, fmt.Errorf("tokenize request: %w", err)
 		}
 		reqLines = burpColourMessage(reqLines)
 	}
 	if hasRes {
-		resLines, err = highlight.Tokenize(cfg.Response, "http", "response.http", theme.Chroma)
+		resLines, resLayout, err = tokenizeHTTP(cfg.Response, theme.Chroma)
 		if err != nil {
 			return nil, fmt.Errorf("tokenize response: %w", err)
 		}
@@ -483,7 +594,9 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	if hasReq && highlight.Extent(reqLines).First > 1 {
 		cfg.warnf("the request line is not in the view; the image does not show where the request was sent")
 	}
-	if hasRes && highlight.Extent(resLines).First > 1 {
+	// After an interim block (100 Continue, a proxy's "Connection established")
+	// the status that matters is the final one, and line 1 is not it.
+	if hasRes && !showsLine(resLines, resLayout.status+1) {
 		cfg.warnf("the status line is not in the view; the image does not show the response's status")
 	}
 
@@ -563,6 +676,16 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	}
 	pane = withFootnote(pane, note, theme.UI, m)
 	return withCaption(pane, cfg.Caption, theme.UI, m), nil
+}
+
+// showsLine reports whether source line n is in a filtered view.
+func showsLine(lines []highlight.LineTokens, n int) bool {
+	for _, lt := range lines {
+		if !lt.IsGap && lt.LineNum == n {
+			return true
+		}
+	}
+	return false
 }
 
 // renderPair renders both panels at the same height, so the shorter one's
