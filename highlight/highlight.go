@@ -26,20 +26,7 @@ type LineTokens struct {
 // Tokenize tokenizes src and returns one LineTokens per source line.
 // lang may be empty for auto-detection. filename is used for extension-based detection.
 func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, error) {
-	var lexer chroma.Lexer
-	if lang != "" {
-		lexer = lexers.Get(lang)
-	}
-	if lexer == nil && filename != "" {
-		lexer = lexers.Match(filename)
-	}
-	if lexer == nil {
-		lexer = lexers.Analyse(src)
-	}
-	if lexer == nil {
-		lexer = lexers.Fallback
-	}
-	lexer = chroma.Coalesce(lexer)
+	lexer := chroma.Coalesce(pickLexer(src, lang, filename))
 
 	if style == nil {
 		style = styles.Get("monokai")
@@ -90,6 +77,42 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 	}
 
 	return lines, nil
+}
+
+// pickLexer chooses the lexer: an explicit language, then the filename, then
+// content analysis, then plain text. A language chroma does not know falls
+// through to the next step without a word — KnownLang is how a caller finds
+// out.
+func pickLexer(src, lang, filename string) chroma.Lexer {
+	var lexer chroma.Lexer
+	if lang != "" {
+		lexer = lexers.Get(lang)
+	}
+	if lexer == nil && filename != "" {
+		lexer = lexers.Match(filename)
+	}
+	if lexer == nil {
+		lexer = lexers.Analyse(src)
+	}
+	if lexer == nil {
+		lexer = lexers.Fallback
+	}
+	return lexer
+}
+
+// KnownLang reports whether name is a language chroma can highlight. Tokenize
+// treats an unknown --lang as absent, so "pyhton" quietly becomes whatever the
+// filename or content analysis guesses — on stdin, often plain text. The CLI
+// needs this to say so instead of handing back an unhighlighted image.
+func KnownLang(name string) bool {
+	return name != "" && lexers.Get(name) != nil
+}
+
+// LexerName is the name of the lexer Tokenize would use for the same
+// arguments, so a warning about an unknown --lang can say what was used
+// instead.
+func LexerName(src, lang, filename string) string {
+	return pickLexer(src, lang, filename).Config().Name
 }
 
 // Text is the plain text of the line, with tabs already expanded, so column

@@ -494,3 +494,24 @@ func BenchmarkFindLiteral(b *testing.B) {
 		FindLiteral(lines, "sk_live_ABC")
 	}
 }
+
+// An unknown --lang falls through to filename or content detection without a
+// word. KnownLang and LexerName are how the CLI can say so, and what it used.
+func TestKnownLang(t *testing.T) {
+	for _, name := range []string{"go", "python", "http", "text", "JSON"} {
+		if !KnownLang(name) {
+			t.Errorf("KnownLang(%q) = false", name)
+		}
+	}
+	for _, name := range []string{"", "pyhton", "no-such-lexer"} {
+		if KnownLang(name) {
+			t.Errorf("KnownLang(%q) = true", name)
+		}
+	}
+	if got := LexerName("x = 1\n", "pyhton", "a.go"); got != "Go" {
+		t.Errorf("LexerName with an unknown --lang and a .go file = %q, want Go", got)
+	}
+	if got := LexerName("x = 1\n", "python", "a.go"); got != "Python" {
+		t.Errorf("LexerName with a known --lang = %q, want Python", got)
+	}
+}
