@@ -515,3 +515,32 @@ func TestKnownLang(t *testing.T) {
 		t.Errorf("LexerName with a known --lang = %q, want Python", got)
 	}
 }
+
+// Invalid bytes turn into U+FFFD inside chroma and draw as a real glyph, so the
+// image silently loses their values. The count is what lets the CLI say so.
+func TestInvalidUTF8(t *testing.T) {
+	cases := []struct {
+		src         string
+		count, line int
+	}{
+		{"plain\nñ → ✓\n", 0, 0},
+		{"token=abc\xff\xfedef\n", 2, 1},
+		{"ok\nok\nbad\x80\n\xc3\n", 2, 3},
+		// A literal U+FFFD in the source is valid UTF-8, not a lost byte.
+		{"already � here\n", 0, 0},
+	}
+	for _, c := range cases {
+		n, line := InvalidUTF8(c.src)
+		if n != c.count || line != c.line {
+			t.Errorf("InvalidUTF8(%q) = %d, line %d; want %d, line %d", c.src, n, line, c.count, c.line)
+		}
+	}
+	// The rendering stays as it was: each invalid byte is one U+FFFD.
+	lines, err := Tokenize("token=abc\xff\xfedef\n", "text", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := lines[0].Text(); got != "token=abc��def" {
+		t.Errorf("rendered text = %q", got)
+	}
+}

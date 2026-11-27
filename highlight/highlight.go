@@ -115,6 +115,31 @@ func LexerName(src, lang, filename string) string {
 	return pickLexer(src, lang, filename).Config().Name
 }
 
+// InvalidUTF8 counts the bytes of src that are not valid UTF-8, and the
+// 1-based line of the first one (0 when there are none). chroma lexes runes, so
+// each such byte becomes U+FFFD before a token exists; U+FFFD has a glyph, so
+// nothing downstream notices that the image cannot show what the byte was, and
+// a --mark or --redact needle holding those bytes can never match. The CLI
+// uses this to say so. Rendering is unchanged: the source hash keeps the raw
+// bytes for provenance.
+func InvalidUTF8(src string) (count, firstLine int) {
+	line := 1
+	for i := 0; i < len(src); {
+		r, size := utf8.DecodeRuneInString(src[i:])
+		switch {
+		case r == utf8.RuneError && size == 1:
+			count++
+			if firstLine == 0 {
+				firstLine = line
+			}
+		case r == '\n':
+			line++
+		}
+		i += size
+	}
+	return count, firstLine
+}
+
 // Text is the plain text of the line, with tabs already expanded, so column
 // numbers taken from it line up with what gets drawn.
 func (lt LineTokens) Text() string {
