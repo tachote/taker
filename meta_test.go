@@ -26,27 +26,7 @@ func TestPNGMetaRoundTrips(t *testing.T) {
 		t.Fatalf("metadata broke the PNG: %v", err)
 	}
 
-	got := map[string]string{}
-	off := 8 // signature
-	for off < len(data) {
-		length := int(binary.BigEndian.Uint32(data[off:]))
-		ctype := string(data[off+4 : off+8])
-		payload := data[off+8 : off+8+length]
-		if ctype == "IEND" {
-			break
-		}
-		// Every chunk's CRC must check, not just ours: a corrupt chunk is
-		// worse than a missing one.
-		want := crc32.ChecksumIEEE(data[off+4 : off+8+length])
-		if binary.BigEndian.Uint32(data[off+8+length:]) != want {
-			t.Fatalf("chunk %s has a bad CRC", ctype)
-		}
-		if ctype == "tEXt" {
-			key, val, _ := bytes.Cut(payload, []byte{0})
-			got[string(key)] = string(val)
-		}
-		off += 12 + length
-	}
+	got := pngTextChunks(t, data)
 	for _, kv := range meta {
 		if got[kv[0]] != kv[1] {
 			t.Errorf("tEXt %q = %q, want %q", kv[0], got[kv[0]], kv[1])
@@ -61,4 +41,36 @@ func TestSHA256Hex(t *testing.T) {
 	if got := sha256Hex(nil); got != empty {
 		t.Errorf("sha256 of empty input = %s, want %s", got, empty)
 	}
+}
+
+// pngTextChunks walks the real chunk structure of an encoded PNG and returns
+// its text metadata by keyword — what a consumer holding only the detached
+// image can read. Every chunk's CRC must check, not just ours: a corrupt chunk
+// is worse than a missing one.
+func pngTextChunks(t *testing.T, data []byte) map[string]string {
+	t.Helper()
+	got := map[string]string{}
+	if len(data) < 8 {
+		t.Fatalf("not a PNG: %d bytes", len(data))
+	}
+	off := 8 // signature
+	for off+12 <= len(data) {
+		length := int(binary.BigEndian.Uint32(data[off:]))
+		ctype := string(data[off+4 : off+8])
+		payload := data[off+8 : off+8+length]
+		if ctype == "IEND" {
+			break
+		}
+		want := crc32.ChecksumIEEE(data[off+4 : off+8+length])
+		if binary.BigEndian.Uint32(data[off+8+length:]) != want {
+			t.Fatalf("chunk %s has a bad CRC", ctype)
+		}
+		switch ctype {
+		case "tEXt":
+			key, val, _ := bytes.Cut(payload, []byte{0})
+			got[string(key)] = string(val)
+		}
+		off += 12 + length
+	}
+	return got
 }

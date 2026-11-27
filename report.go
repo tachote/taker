@@ -336,6 +336,13 @@ func (r *reporter) scrubSecrets() {
 		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
 	}
 	for i, kv := range r.metaKV {
+		// The input hashes are computed over content addInput already masked,
+		// so they cannot carry a secret. Scrubbing them again only destroys
+		// provenance: a hex --redact-re wipes the sum, a short fragment cuts
+		// a hole in it, and the PNG stops agreeing with the report.
+		if strings.HasPrefix(kv[0], "taker:sha256") {
+			continue
+		}
 		r.metaKV[i][1] = scrubRedactArgs(r.scrub(deansi(kv[1])))
 	}
 	for i, w := range r.rep.Warnings {

@@ -637,3 +637,41 @@ func TestExecScrubsShellSecrets(t *testing.T) {
 		t.Error("the taker:exec chunk embeds the redacted literal")
 	}
 }
+
+// The PNG's own taker:sha256 chunk must equal the report's sum. The hash is
+// computed over content that is already masked, so it cannot carry a secret —
+// scrubbing it a second time only destroyed the provenance: a hex --redact-re
+// wiped it, and a short fragment cut a hole in the middle of it.
+func TestPNGHashSurvivesRedaction(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  SnapCmd
+	}{
+		{"hex pattern", SnapCmd{RedactRe: []string{`[0-9a-f]{32}`}}},
+		{"short fragment", SnapCmd{Redact: []string{"k-e3-9f-a1-0c-d4"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "k.py")
+			src := "api_key = \"9e107d9d372bb6826bd81d3542a419d6\"\nk = \"k-e3-9f-a1-0c-d4\"\n"
+			if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out := filepath.Join(dir, "k.png")
+			cmd := tc.cmd
+			cmd.File, cmd.Output, cmd.JSON = file, out, true
+			code, rep, _ := runJSON(t, func(r *reporter) int { return runSnap(snapCmd(cmd), r) })
+			if code != exitOK || len(rep.SHA256) != 1 {
+				t.Fatalf("run = %d, sha256 = %+v", code, rep.SHA256)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := pngTextChunks(t, data)["taker:sha256"]; got != rep.SHA256[0].Sum {
+				t.Errorf("PNG taker:sha256 = %q, report says %q", got, rep.SHA256[0].Sum)
+			}
+		})
+	}
+}
