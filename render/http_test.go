@@ -346,7 +346,7 @@ func TestBurpJSONFramingIsPlainText(t *testing.T) {
 		colourToken(`"test"`, burpString),
 		colourToken(",", burpLineColour),
 	}
-	got := burpBodyTokens(`    "user":"test",`, lexed, "application/json")
+	got := burpBodyTokens(`    "user":"test",`, lexed, "application/json", false)
 	want := []highlight.Token{lexed[0], lexed[1], colourToken(":", burpBodyText), lexed[3], colourToken(",", burpBodyText)}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tokens, want %d", len(got), len(want))
@@ -683,7 +683,7 @@ func TestBodyColouredWhenHTTPLexerRejectsALine(t *testing.T) {
 	}{
 		{"http2 post", ":method: POST\n:path: /api/users\n:authority: a.test\ncontent-type: application/json\n\n" +
 			`{"role":"admin","id":7}` + "\n", 6, `"role"`},
-		{"webdav verb", "PROPFIND /dav HTTP/1.1\nHost: a\nContent-Type: application/xml\n\n<a>1</a>\n", 5, "<a>"},
+		{"webdav verb", "PROPFIND /dav HTTP/1.1\nHost: a\nContent-Type: application/xml\n\n<a>1</a>\n", 5, "a"},
 		{"empty header value", "POST /x HTTP/1.1\r\nHost: a\r\nX-Empty:\r\nContent-Type: application/json\r\n\r\n" +
 			`{"role":"admin"}`, 6, `"role"`},
 		{"structured suffix", "HTTP/1.1 200 OK\nContent-Type: application/problem+json\n\n" +
@@ -917,5 +917,51 @@ func TestRenderTabFollowsContentType(t *testing.T) {
 		if got := !tabs[len(tabs)-1].disabled; got != want {
 			t.Errorf("Render enabled = %v, want %v for %q", got, want, msg)
 		}
+	}
+}
+
+// Burp paints markup delimiters as plain text and only the names in the tag
+// colour. chroma's XML lexer folds the brackets and the attribute '=' into its
+// tag tokens ("<user", "id=", "</name><email>"), and the HTML lexer leaves
+// "></" and ")</" in the punctuation colour, so the same structure looked
+// different depending on the declared type.
+func TestMarkupDelimitersArePlainText(t *testing.T) {
+	xml := "HTTP/1.1 200 OK\nContent-Type: application/xml\n\n" +
+		`<user id="1"><name>&xxe;</name><email>a@b.test</email></user>` + "\n"
+	got := colourHTTP(t, xml)
+	for _, want := range []struct {
+		text string
+		c    color.NRGBA
+	}{
+		{"<", burpBodyText}, {"user", burpNameTag}, {"id", burpNameTag}, {"=", burpBodyText},
+		{`"1"`, burpString}, {"><", burpBodyText}, {"name", burpNameTag}, {"</", burpBodyText},
+		{"email", burpNameTag}, {">", burpBodyText},
+	} {
+		if !hasToken(got, 4, want.text, want.c) {
+			t.Errorf("xml: no %q in %v: %+v", want.text, want.c, got[3].Tokens)
+		}
+	}
+	var text strings.Builder
+	for _, tok := range got[3].Tokens {
+		text.WriteString(tok.Text)
+	}
+	if !strings.Contains(xml, text.String()+"\n") {
+		t.Errorf("splitting changed the text: %q", text.String())
+	}
+
+	html := "HTTP/1.1 200 OK\nContent-Type: text/html\n\n<p><script>alert(1)</script></p>\n"
+	got = colourHTTP(t, html)
+	if !hasToken(got, 4, "</", burpBodyText) || !hasToken(got, 4, "></", burpBodyText) {
+		t.Errorf("html: closing delimiters keep the punctuation colour: %+v", got[3].Tokens)
+	}
+	if !hasToken(got, 4, "script", burpNameTag) {
+		t.Errorf("html: tag name lost its colour: %+v", got[3].Tokens)
+	}
+
+	// A JSON key that holds markup is a key, not a tag.
+	js := "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + `{"<b>":"x"}` + "\n"
+	got = colourHTTP(t, js)
+	if !hasToken(got, 4, `"<b>"`, burpNameTag) {
+		t.Errorf("json key with markup was split: %+v", got[3].Tokens)
 	}
 }

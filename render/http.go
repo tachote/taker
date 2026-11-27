@@ -109,6 +109,7 @@ func burpColourMessage(lines []highlight.LineTokens) []highlight.LineTokens {
 		texts[i] = lt.Text()
 	}
 	layout := layoutHTTP(texts)
+	markup := isMarkup(layout.contentType)
 	for i := range lines {
 		lt := &lines[i]
 		if lt.IsGap {
@@ -117,7 +118,7 @@ func burpColourMessage(lines []highlight.LineTokens) []highlight.LineTokens {
 		text := texts[i]
 		switch {
 		case i >= layout.body:
-			lt.Tokens = burpBodyTokens(text, lt.Tokens, layout.contentType)
+			lt.Tokens = burpBodyTokens(text, lt.Tokens, layout.contentType, markup)
 		case isStartLine(text):
 			// Request line or status line: one colour, no structure. Only a
 			// line inside the header block can be one — a body line like
@@ -447,9 +448,15 @@ func isFraming(s string) bool {
 // Burp decides the body view from the declared Content-Type, not from the
 // shape of a line: a json string carrying "a=1&b=2" is json, not a form. Only
 // a message without a declared type falls back to the line's shape.
-func burpBodyTokens(text string, lexed []highlight.Token, contentType string) []highlight.Token {
+//
+// markup says the body is XML or HTML, whose tag delimiters are split out of
+// the lexer's tokens first (see splitMarkup).
+func burpBodyTokens(text string, lexed []highlight.Token, contentType string, markup bool) []highlight.Token {
 	if isFormContentType(contentType) || (contentType == "" && looksFormEncoded(text)) {
 		return formFieldTokens(text)
+	}
+	if markup {
+		lexed = splitMarkup(lexed)
 	}
 	// Burp paints a body's framing as ordinary text: in
 	// `"username":"test",` the key and its value carry the json colours
@@ -459,6 +466,55 @@ func burpBodyTokens(text string, lexed []highlight.Token, contentType string) []
 	// style, which also colours the separators of a URL's query string and
 	// there the theme's roles (separator, operator) are blue.
 	return repaintFraming(lexed)
+}
+
+// isMarkup reports a declared XML or HTML body: the two lexers whose tag
+// tokens carry delimiters. Decided by type, not by token text, because a JSON
+// key holding "<b>" is in the same tag colour and must stay whole.
+func isMarkup(contentType string) bool {
+	switch bodyLexer(contentType) {
+	case "XML", "HTML":
+		return true
+	}
+	return false
+}
+
+// splitMarkup gives markup delimiters the plain body colour, as Burp paints
+// them. chroma's XML lexer folds them into its tag tokens ("<user", "id=",
+// "</name><email>"), and the HTML lexer leaves "></" and ")</" in the
+// punctuation colour, so the same structure looked different depending on the
+// declared type. Only the delimiters move: names keep the tag colour, and the
+// text is unchanged, so marks and redaction columns still line up.
+func splitMarkup(toks []highlight.Token) []highlight.Token {
+	out := make([]highlight.Token, 0, len(toks))
+	for _, tok := range toks {
+		c := color.NRGBA{tok.R, tok.G, tok.B, 0xff}
+		var delims string
+		switch {
+		case c == burpNameTag:
+			delims = "<>/?!=" // a tag or attribute name holds none of these
+		case c == burpLineColour && strings.ContainsAny(tok.Text, "<>"):
+			delims = "<>/"
+		default:
+			out = append(out, tok)
+			continue
+		}
+		rest := tok.Text
+		for rest != "" {
+			isDelim := strings.ContainsRune(delims, rune(rest[0]))
+			n := strings.IndexFunc(rest, func(r rune) bool { return strings.ContainsRune(delims, r) != isDelim })
+			if n < 0 {
+				n = len(rest)
+			}
+			if isDelim {
+				out = append(out, colourToken(rest[:n], burpBodyText))
+			} else {
+				out = append(out, highlight.Token{Text: rest[:n], R: tok.R, G: tok.G, B: tok.B})
+			}
+			rest = rest[n:]
+		}
+	}
+	return out
 }
 
 // isFormContentType reports a declared URL-encoded body, parameters included.
