@@ -52,20 +52,17 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 		return nil, err
 	}
 
+	fr, fg, fb := defaultText(style)
+
 	var lines []LineTokens
 	current := LineTokens{LineNum: 1}
 
 	for tok := it(); tok != chroma.EOF; tok = it() {
 		text := expandTabs(tok.Value, 4)
 		entry := style.Get(tok.Type)
-		r, g, b := colorToRGB(entry.Colour)
-		// Use default text color if no color set
-		if entry.Colour == 0 {
-			defEntry := style.Get(chroma.Text)
-			r, g, b = colorToRGB(defEntry.Colour)
-			if r == 0 && g == 0 && b == 0 {
-				r, g, b = 0xd4, 0xd4, 0xd4 // VS Code default text
-			}
+		r, g, b := fr, fg, fb
+		if entry.Colour.IsSet() {
+			r, g, b = entry.Colour.Red(), entry.Colour.Green(), entry.Colour.Blue()
 		}
 
 		parts := strings.Split(text, "\n")
@@ -193,9 +190,18 @@ func expandTabs(s string, tabWidth int) string {
 	return strings.ReplaceAll(s, "\t", strings.Repeat(" ", tabWidth))
 }
 
-func colorToRGB(c chroma.Colour) (r, g, b uint8) {
-	if c == 0 {
-		return 0, 0, 0
+// defaultText is the colour for a token the style leaves uncoloured. Style.Get
+// already inherits the style's Text entry, so this only runs for styles that
+// set no text colour at all — chroma's light "github" among them. The VS Code
+// dark default on its white background drew plain-text evidence (snap of a
+// .txt, every term and exec transcript) light grey on white, so the fallback
+// follows the background: GitHub's own foreground on a light one.
+func defaultText(style *chroma.Style) (r, g, b uint8) {
+	if c := style.Get(chroma.Text).Colour; c.IsSet() {
+		return c.Red(), c.Green(), c.Blue()
 	}
-	return c.Red(), c.Green(), c.Blue()
+	if bg := style.Get(chroma.Background).Background; bg.IsSet() && bg.Brightness() > 0.5 {
+		return 0x1f, 0x23, 0x28 // GitHub's default foreground
+	}
+	return 0xd4, 0xd4, 0xd4 // VS Code default text
 }

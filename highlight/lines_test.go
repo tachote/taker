@@ -4,6 +4,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/styles"
 )
 
 func TestParseLineSpec(t *testing.T) {
@@ -323,5 +326,39 @@ func TestShiftLines(t *testing.T) {
 	// 1 is the default and has to be a no-op.
 	if got := ShiftLines(lines, 1); got[0].LineNum != 1 {
 		t.Errorf("first-line 1 shifted the input: %d", got[0].LineNum)
+	}
+}
+
+// A light style that sets no text colour (chroma's "github") used to fall back
+// to the dark-theme default, #d4d4d4: plain-text evidence drawn light grey on
+// white, barely legible. The fallback follows the background instead.
+func TestTokenizeTextFallbackFollowsBackground(t *testing.T) {
+	gh := styles.Get("github")
+	if gh.Get(chroma.Text).Colour.IsSet() {
+		t.Skip("chroma's github style now sets a text colour; the fallback is not exercised")
+	}
+	lines, err := Tokenize("user=admin password=hunter2\n", "text", "", gh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := lines[0].Tokens[0]
+	if luma := (299*int(tok.R) + 587*int(tok.G) + 114*int(tok.B)) / 1000; luma > 96 {
+		t.Errorf("plain text on github = #%02x%02x%02x, want a dark colour on its white background", tok.R, tok.G, tok.B)
+	}
+
+	// A dark style keeps its own text colour.
+	lines, _ = Tokenize("x\n", "text", "", styles.Get("monokai"))
+	if tok := lines[0].Tokens[0]; tok.R < 0xc0 {
+		t.Errorf("plain text on monokai = #%02x%02x%02x, want its light text colour", tok.R, tok.G, tok.B)
+	}
+
+	// A style whose text colour really is black is set, not missing.
+	black := chroma.MustNewStyle("black-on-white", chroma.StyleEntries{
+		chroma.Text:       "#000000",
+		chroma.Background: "bg:#ffffff",
+	})
+	lines, _ = Tokenize("x\n", "text", "", black)
+	if tok := lines[0].Tokens[0]; tok.R|tok.G|tok.B != 0 {
+		t.Errorf("black text style drew #%02x%02x%02x, want #000000", tok.R, tok.G, tok.B)
 	}
 }
