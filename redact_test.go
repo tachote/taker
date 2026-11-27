@@ -254,3 +254,98 @@ func TestRedactKeepWarningCountsCharacters(t *testing.T) {
 		t.Errorf("warnings = %v, want 'hides only 1 char(s)'", rep.Warnings)
 	}
 }
+
+// A --redact literal's fragments are masked only as whole tokens: "app" from
+// app.example.test must not black out the middle of "application/json", and
+// only the literal the analyst typed earns a "matched nothing" warning — not
+// each part split from it.
+func TestRedactFragmentsMaskWholeTokensOnly(t *testing.T) {
+	dir := t.TempDir()
+	req := filepath.Join(dir, "r.http")
+	body := "POST /x HTTP/1.1\nHost: app.example.test\nContent-Type: application/json\n\n{\"err\":\"parsing \\\"app\\\"\"}\n"
+	if err := os.WriteFile(req, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{Request: req, Output: filepath.Join(dir, "o.png"), JSON: true, DryRun: true,
+			Redact: []string{"app.example.test"}}, r)
+	})
+	if code != exitOK {
+		t.Fatalf("http = %d", code)
+	}
+	// Host line: the literal plus its three parts, overlapping it (4). Body:
+	// the echoed "app" (1). "application" stays readable — boxing it made 6.
+	if rep.Redactions != 5 {
+		t.Errorf("redactions = %d, want 5 — 'application' must stay readable", rep.Redactions)
+	}
+
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{Request: req, JSON: true, DryRun: true,
+			Redact: []string{"nothere-zzz.qq"}}, r)
+	})
+	if code != exitOK {
+		t.Fatalf("http = %d", code)
+	}
+	n := 0
+	for _, w := range rep.Warnings {
+		if strings.Contains(w, "matched nothing") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("warnings = %v, want one 'matched nothing' for the one literal typed", rep.Warnings)
+	}
+}
+
+// snap and term share the rule.
+func TestRedactFragmentsSnapAndTerm(t *testing.T) {
+	const text = "host = \"app.example.test\"\nctype = \"application/json\"\nerr: parsing \"app\"\n"
+	dir, file := writeTranscript(t, text)
+	for _, run := range []func(r *reporter) int{
+		func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Output: filepath.Join(dir, "s.png"), DryRun: true, JSON: true,
+				Redact: []string{"app.example.test", "nothere-zzz.qq"}}), r)
+		},
+		func(r *reporter) int {
+			return runTerm(termCmd(TermCmd{File: file, Output: filepath.Join(dir, "t.png"), DryRun: true, JSON: true,
+				Redact: []string{"app.example.test", "nothere-zzz.qq"}}), r)
+		},
+	} {
+		code, rep, _ := runJSON(t, run)
+		if code != exitOK {
+			t.Fatalf("run = %d", code)
+		}
+		// Line 1: the literal plus its three parts, overlapping it (4).
+		// Line 3: the echoed "app" (1). Boxing "application" made 6.
+		if rep.Redactions != 5 {
+			t.Errorf("redactions = %d, want 5 — 'application' must stay readable", rep.Redactions)
+		}
+		n := 0
+		for _, w := range rep.Warnings {
+			if strings.Contains(w, "matched nothing") {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("warnings = %v, want exactly one 'matched nothing'", rep.Warnings)
+		}
+	}
+}
+
+func TestTokenRe(t *testing.T) {
+	for _, tc := range []struct {
+		frag, text string
+		want       bool
+	}{
+		{"app", "application/json", false},
+		{"app", "Host: app.example", true},
+		{"ZX9", `parsing "ZX9": invalid`, true},
+		{"ZX9", "xZX9y", false},
+		{"!bang", "a !bang", true}, // punctuation edge: no \b demanded there
+		{"tok", "tok_id", false},
+	} {
+		if got := tokenRe(tc.frag).MatchString(tc.text); got != tc.want {
+			t.Errorf("tokenRe(%q) on %q = %v, want %v", tc.frag, tc.text, got, tc.want)
+		}
+	}
+}

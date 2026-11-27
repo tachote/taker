@@ -51,6 +51,11 @@ type HTTPConfig struct {
 	// RedactRe hides compiled-pattern matches the same way — a JWT or bearer
 	// shape is a pattern, not a literal.
 	RedactRe []*regexp.Regexp
+	// RedactFrag hides parts of the Redact literals, as whole-token patterns
+	// built by the caller: a server that echoes only a fragment of a secret
+	// must not leave it readable. Unlike Redact, a fragment that matched
+	// nothing is not warned about — nobody asked for it by name.
+	RedactFrag []*regexp.Regexp
 	// RedactKeep leaves this many leading characters of each match visible
 	// (sk_l…████) so the box still identifies what was hidden.
 	RedactKeep int
@@ -673,10 +678,11 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	// over rather than boxed in red. They never merge into HighlightLines.
 	redact, redactStats := highlight.FindMarks(msgs, cfg.Redact, 0)
 	redactRe, redactReStats := highlight.FindRegexMarks(msgs, cfg.RedactRe, 0)
+	redactFrag, _ := highlight.FindRegexMarks(msgs, cfg.RedactFrag, 0)
 	var reqRedact, resRedact highlight.Marks
 	consumed := 0
 	for i, side := range sideOf {
-		m, c := highlight.KeepSpans(redact[i].Merge(redactRe[i]), cfg.RedactKeep)
+		m, c := highlight.KeepSpans(redact[i].Merge(redactRe[i]).Merge(redactFrag[i]), cfg.RedactKeep)
 		consumed += c
 		if side == 0 {
 			reqRedact = reqRedact.Merge(m)

@@ -183,7 +183,7 @@ func TestHTTPIsAlwaysBurp(t *testing.T) {
 
 var httpConfigFields = []string{
 	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "MarkRe", "MaxMarks",
-	"Redact", "RedactRe", "RedactKeep", "RedactAsked", "Caption",
+	"Redact", "RedactRe", "RedactFrag", "RedactKeep", "RedactAsked", "Caption",
 	"RequestLines", "ResponseLines", "Context", "WrapWidth",
 	// An out-parameter, not a knob: the renderer writes what it drew into it so
 	// the machine-readable report and the image's own footnote cannot disagree.

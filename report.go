@@ -170,7 +170,8 @@ type reporter struct {
 	secretRes []*regexp.Regexp
 	// fragOnly holds the needles' separator-split components — for the pixel
 	// redaction, so a needle spliced by quotes or escapes leaves no readable
-	// fragment behind.
+	// fragment behind. The image masks them only as whole tokens (see
+	// redactFragRes).
 	fragOnly []string
 }
 
@@ -581,12 +582,44 @@ func cropOf(ext highlight.ViewExtent, total int) Crop {
 	return c
 }
 
-// redactFrags returns the pixel-mask fragments — but only when keep is off:
+// redactFragRes returns the pixel-mask fragments as patterns that match a
+// fragment only where it stands as a whole token — but only when keep is off:
 // --redact-keep shows a span's leading chars, and a kept fragment would show
 // its own. Keep mode is already a weakened guarantee the user asked for.
-func (r *reporter) redactFrags(keep int) []string {
-	if keep > 0 {
+//
+// Whole tokens, because the echo a fragment exists for is bounded by
+// punctuation (strconv reports parsing "ZX9"), while the same letters inside
+// a longer word are ordinary text: "app" from app.example.test blacked out
+// the middle of every "application/json", and evidence that hides what is not
+// secret is not faithful. A fragment glued to other letters by the target
+// ("xZX9y") stays visible; that is the trade this rule makes.
+func (r *reporter) redactFragRes(keep int) []*regexp.Regexp {
+	if keep > 0 || len(r.fragOnly) == 0 {
 		return nil
 	}
-	return r.fragOnly
+	out := make([]*regexp.Regexp, 0, len(r.fragOnly))
+	for _, f := range r.fragOnly {
+		out = append(out, tokenRe(f))
+	}
+	return out
+}
+
+// tokenRe matches s where no word character touches it. The boundary is put
+// only on an edge that is itself an ASCII word character: \b next to "!" or
+// "ñ" would demand a word character outside, and a fragment that starts with
+// punctuation would never match at all. An edge left unbounded only masks
+// more.
+func tokenRe(s string) *regexp.Regexp {
+	pat := regexp.QuoteMeta(s)
+	if isWordByte(s[0]) {
+		pat = `\b` + pat
+	}
+	if isWordByte(s[len(s)-1]) {
+		pat += `\b`
+	}
+	return regexp.MustCompile(pat)
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
 }

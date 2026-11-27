@@ -415,9 +415,12 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 
 	// Redaction searches the untrimmed input like marks do: a secret has to be
 	// hidden in the excerpt, not only in the lines the image ends up showing.
-	redact, redactStats := highlight.FindMarks(msgs, slices.Concat(cmd.Redact, rep.redactFrags(cmd.RedactKeep)), 0)
+	redact, redactStats := highlight.FindMarks(msgs, cmd.Redact, 0)
 	redactReM, redactReStats := highlight.FindRegexMarks(msgs, redactRe, 0)
-	redactMarks, consumed := highlight.KeepSpans(redact[0].Merge(redactReM[0]), cmd.RedactKeep)
+	// Fragments are boxed but not reported: the analyst typed the literal,
+	// not its parts, so a part that matched nothing is no caveat.
+	fragM, _ := highlight.FindRegexMarks(msgs, rep.redactFragRes(cmd.RedactKeep), 0)
+	redactMarks, consumed := highlight.KeepSpans(redact[0].Merge(redactReM[0]).Merge(fragM[0]), cmd.RedactKeep)
 	matched := 0
 	for _, st := range redactStats {
 		matched += st.Matches
@@ -692,7 +695,8 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		ResponseHL:    resHL,
 		Mark:          cmd.Mark,
 		MarkRe:        markRe,
-		Redact:        slices.Concat(cmd.Redact, rep.redactFrags(cmd.RedactKeep)),
+		Redact:        cmd.Redact,
+		RedactFrag:    rep.redactFragRes(cmd.RedactKeep),
 		RedactRe:      redactRe,
 		RedactKeep:    cmd.RedactKeep,
 		RedactAsked:   len(cmd.Redact)+len(cmd.RedactRe) > 0,
@@ -1057,14 +1061,17 @@ func keepExposesMsg(keep, exposed int) string {
 }
 
 // termRedact finds the literals to hide and warns when one matched nothing —
-// a redact that hides nothing looks exactly like a clean image. A nonzero
-// second return is the exit code of a fatal misuse (e.g. keep exposing the
-// whole secret); the caller returns it verbatim.
-func termRedact(lines []highlight.LineTokens, needles []string, res []*regexp.Regexp, keep int, rep *reporter) (highlight.Marks, int) {
+// a redact that hides nothing looks exactly like a clean image. frags are the
+// literals' whole-token fragments: boxed, never warned about, because the
+// analyst did not type them. A nonzero second return is the exit code of a
+// fatal misuse (e.g. keep exposing the whole secret); the caller returns it
+// verbatim.
+func termRedact(lines []highlight.LineTokens, needles []string, res, frags []*regexp.Regexp, keep int, rep *reporter) (highlight.Marks, int) {
 	found, stats := highlight.FindMarks([][]highlight.LineTokens{lines}, needles, 0)
 	foundRe, reStats := highlight.FindRegexMarks([][]highlight.LineTokens{lines}, res, 0)
+	foundFrag, _ := highlight.FindRegexMarks([][]highlight.LineTokens{lines}, frags, 0)
 	stats = append(stats, reStats...)
-	kept, consumed := highlight.KeepSpans(found[0].Merge(foundRe[0]), keep)
+	kept, consumed := highlight.KeepSpans(found[0].Merge(foundRe[0]).Merge(foundFrag[0]), keep)
 	matched := 0
 	for i, st := range stats {
 		matched += st.Matches
@@ -1353,7 +1360,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	rep.rep.Source = &Source{Kind: "exec", Path: cmdStr}
 	rep.scrubSecrets()
 
-	redactM, code := termRedact(lines, slices.Concat(cmd.Redact, rep.redactFrags(cmd.RedactKeep)), redactRe, cmd.RedactKeep, rep)
+	redactM, code := termRedact(lines, cmd.Redact, redactRe, rep.redactFragRes(cmd.RedactKeep), cmd.RedactKeep, rep)
 	if code != 0 {
 		return code
 	}
@@ -1441,7 +1448,7 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	rep.rep.Source = &Source{Kind: "transcript", Path: cmd.File}
 	rep.scrubSecrets()
 
-	redactM, code := termRedact(lines, slices.Concat(cmd.Redact, rep.redactFrags(cmd.RedactKeep)), redactRe, cmd.RedactKeep, rep)
+	redactM, code := termRedact(lines, cmd.Redact, redactRe, rep.redactFragRes(cmd.RedactKeep), cmd.RedactKeep, rep)
 	if code != 0 {
 		return code
 	}
