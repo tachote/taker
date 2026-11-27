@@ -2,9 +2,11 @@ package render
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image/color"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -616,6 +618,31 @@ func TestHTTPRedact(t *testing.T) {
 	}
 	if facts.Redacted == 0 {
 		t.Error("no redaction box drawn for a literal in the capture")
+	}
+}
+
+// A RedactKeep at least as long as one match would draw that match in full.
+// The renderer refuses with a typed error instead of drawing four boxes and
+// one secret; the old warning fired only when every match was consumed.
+func TestHTTPRedactKeepRefusesAnExposedMatch(t *testing.T) {
+	re := regexp.MustCompile(`sid=[a-z]+|"pass":"[a-z0-9]+"`)
+	_, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RedactRe: []*regexp.Regexp{re}, RedactKeep: 7, // "sid=abc" is 7 chars
+	})
+	var keepErr *RedactKeepError
+	if !errors.As(err, &keepErr) {
+		t.Fatalf("err = %v, want a *RedactKeepError", err)
+	}
+	if keepErr.Keep != 7 || keepErr.Exposed != 1 {
+		t.Errorf("err = %+v, want keep 7 with 1 exposed match", keepErr)
+	}
+	// Under the length of every match, the render goes ahead.
+	if _, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RedactRe: []*regexp.Regexp{re}, RedactKeep: 4,
+	}); err != nil {
+		t.Errorf("keep 4 = %v, want a render", err)
 	}
 }
 

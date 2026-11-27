@@ -96,7 +96,7 @@ taker [file] [flags]
 | `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal, earliest first |
 | `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable |
 | `--redact-re` | | — | Hide every regex match under a black box. Repeatable |
-| `--redact-keep` | | 0 | Leave the first N characters of each `--redact` match visible (`4` → `sk_l…████`) |
+| `--redact-keep` | | 0 | Leave the first N characters of each `--redact` match visible (`4` → `sk_l…████`). A run where any match is N characters or shorter is refused (exit 2): that match would be drawn in full |
 | `--label` | `-L` | — | Caption stating what the image proves |
 | `--context` | `-c` | 0 | Include N context lines around each highlighted line |
 | `--wrap` | `-w` | false | Wrap long lines at a column boundary |

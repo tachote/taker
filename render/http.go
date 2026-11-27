@@ -87,6 +87,20 @@ type HTTPConfig struct {
 	Facts *HTTPFacts
 }
 
+// RedactKeepError refuses a render in which RedactKeep would leave whole
+// matches visible: each such match is RedactKeep characters long or shorter,
+// so shifting its box right by RedactKeep leaves no box at all. It is the
+// caller's misuse rather than a render failure, so it has its own type.
+type RedactKeepError struct {
+	Keep    int // the RedactKeep that was asked for
+	Exposed int // matches that would be drawn in full
+}
+
+func (e *RedactKeepError) Error() string {
+	return fmt.Sprintf("--redact-keep %d leaves %d match(es) fully visible (each %d char(s) or shorter) — lower it or drop it",
+		e.Keep, e.Exposed, e.Keep)
+}
+
 // warnf routes a render warning through Warn the way Config.warnf does, so the
 // CLI's report and the caller's stderr both see it.
 func (cfg *HTTPConfig) warnf(format string, args ...any) {
@@ -660,8 +674,10 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	redact, redactStats := highlight.FindMarks(msgs, cfg.Redact, 0)
 	redactRe, redactReStats := highlight.FindRegexMarks(msgs, cfg.RedactRe, 0)
 	var reqRedact, resRedact highlight.Marks
+	consumed := 0
 	for i, side := range sideOf {
-		m, _ := highlight.KeepSpans(redact[i].Merge(redactRe[i]), cfg.RedactKeep)
+		m, c := highlight.KeepSpans(redact[i].Merge(redactRe[i]), cfg.RedactKeep)
+		consumed += c
 		if side == 0 {
 			reqRedact = reqRedact.Merge(m)
 		} else {
@@ -678,13 +694,11 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			cfg.warnf("--redact-re %q matched nothing", st.Literal)
 		}
 	}
-	if cfg.RedactKeep > 0 && reqRedact == nil && resRedact == nil {
-		for _, st := range append(redactStats, redactReStats...) {
-			if st.Matches > 0 {
-				cfg.warnf("--redact-keep %d leaves nothing hidden", cfg.RedactKeep)
-				break
-			}
-		}
+	// A match RedactKeep characters long or shorter keeps nothing hidden and
+	// would be drawn in full. That used to be a warning, and only when every
+	// match was consumed; one exposed secret among five is just as exposed.
+	if consumed > 0 {
+		return nil, &RedactKeepError{Keep: cfg.RedactKeep, Exposed: consumed}
 	}
 
 	// Counted before the trim: the view has to be able to state its own extent.

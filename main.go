@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/alecthomas/kong"
 	"github.com/tachote/taker/highlight"
@@ -416,10 +417,13 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	// hidden in the excerpt, not only in the lines the image ends up showing.
 	redact, redactStats := highlight.FindMarks(msgs, slices.Concat(cmd.Redact, rep.redactFrags(cmd.RedactKeep)), 0)
 	redactReM, redactReStats := highlight.FindRegexMarks(msgs, redactRe, 0)
-	redactMarks, _ := highlight.KeepSpans(redact[0].Merge(redactReM[0]), cmd.RedactKeep)
+	redactMarks, consumed := highlight.KeepSpans(redact[0].Merge(redactReM[0]), cmd.RedactKeep)
 	matched := 0
 	for _, st := range redactStats {
 		matched += st.Matches
+		// Characters, not bytes: keep counts columns, and "ñññññ" is 10 bytes
+		// but 5 columns — a byte count passed it under keep 5, drawn in full.
+		chars := utf8.RuneCountInString(st.Literal)
 		switch {
 		case st.Matches == 0:
 			rep.warn("--redact %q matched nothing", st.Literal)
@@ -428,13 +432,13 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 			} else {
 				rep.helpf("nothing was masked — check the value or use --redact-re '<pattern>'")
 			}
-		case cmd.RedactKeep > 0 && len(st.Literal) <= cmd.RedactKeep:
+		case cmd.RedactKeep > 0 && chars <= cmd.RedactKeep:
 			return rep.fail(exitUsage, kindUsage,
 				"--redact-keep %d leaves nothing hidden in --redact %q — lower it or drop it",
 				cmd.RedactKeep, st.Literal)
-		case cmd.RedactKeep > 0 && len(st.Literal)-cmd.RedactKeep < 4:
+		case cmd.RedactKeep > 0 && chars-cmd.RedactKeep < 4:
 			rep.warn("--redact-keep %d hides only %d char(s) of --redact %q",
-				cmd.RedactKeep, len(st.Literal)-cmd.RedactKeep, st.Literal)
+				cmd.RedactKeep, chars-cmd.RedactKeep, st.Literal)
 		}
 	}
 	for _, st := range redactReStats {
@@ -445,7 +449,11 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		}
 	}
 	// The literal check above is per needle; a regex match's length is only
-	// known once spans exist — when keep consumed them all, nothing is hidden.
+	// known once spans exist. Any match keep consumed is a secret drawn in
+	// full, and one exposed match among five looks exactly like five hidden.
+	if consumed > 0 {
+		return rep.fail(exitUsage, kindUsage, "%s", keepExposesMsg(cmd.RedactKeep, consumed))
+	}
 	if cmd.RedactKeep > 0 && matched > 0 && redactMarks == nil {
 		return rep.fail(exitUsage, kindUsage,
 			"--redact-keep %d leaves nothing hidden — lower it or drop it", cmd.RedactKeep)
@@ -658,15 +666,16 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	if cmd.RedactKeep > 0 {
 		for _, lit := range cmd.Redact {
 			present := bytes.Contains(reqSrc, []byte(lit)) || bytes.Contains(resSrc, []byte(lit))
+			chars := utf8.RuneCountInString(lit) // keep counts columns, not bytes
 			switch {
 			case !present:
-			case len(lit) <= cmd.RedactKeep:
+			case chars <= cmd.RedactKeep:
 				return rep.fail(exitUsage, kindUsage,
 					"--redact-keep %d >= length %d of --redact %q — the whole value would stay visible",
-					cmd.RedactKeep, len(lit), lit)
-			case len(lit)-cmd.RedactKeep < 4:
+					cmd.RedactKeep, chars, lit)
+			case chars-cmd.RedactKeep < 4:
 				rep.warn("--redact-keep %d hides only %d char(s) of --redact %q",
-					cmd.RedactKeep, len(lit)-cmd.RedactKeep, lit)
+					cmd.RedactKeep, chars-cmd.RedactKeep, lit)
 			}
 		}
 	}
@@ -696,6 +705,13 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		Facts:         facts,
 		Warn:          func(msg string) { rep.warn("%s", msg) },
 	})
+	// A keep that would draw a match in full is the caller's misuse, found
+	// only once the renderer had the spans — a usage error, like the literal
+	// check above, not a refused render.
+	var keepErr *render.RedactKeepError
+	if errors.As(err, &keepErr) {
+		return rep.fail(exitUsage, kindUsage, "%v", err)
+	}
 	if err != nil {
 		return rep.fail(exitRefused, kindRefused, "render: %v", err)
 	}
@@ -1008,8 +1024,8 @@ func validateRedact(rep *reporter, literals, patterns []string, keep int) int {
 			return rep.fail(exitUsage, kindUsage,
 				"--redact #%d is empty — nothing would be hidden", i+1)
 		}
-		if len(s) <= 2 {
-			rep.warn("--redact %q is %d chars — it masks far more than a secret (quote a literal comma as '\\,')", s, len(s))
+		if n := utf8.RuneCountInString(s); n <= 2 {
+			rep.warn("--redact %q is %d chars — it masks far more than a secret (quote a literal comma as '\\,')", s, n)
 		}
 	}
 	for i, p := range patterns {
@@ -1033,6 +1049,13 @@ func warnMarkRedactOverlap(rep *reporter, marks, redacts []string) {
 	}
 }
 
+// keepExposesMsg is the refusal for a --redact-keep that would draw whole
+// matches in clear. The analyst asked for those values to be hidden, so the
+// run stops instead of shipping an image that hides most of them.
+func keepExposesMsg(keep, exposed int) string {
+	return (&render.RedactKeepError{Keep: keep, Exposed: exposed}).Error()
+}
+
 // termRedact finds the literals to hide and warns when one matched nothing —
 // a redact that hides nothing looks exactly like a clean image. A nonzero
 // second return is the exit code of a fatal misuse (e.g. keep exposing the
@@ -1041,11 +1064,12 @@ func termRedact(lines []highlight.LineTokens, needles []string, res []*regexp.Re
 	found, stats := highlight.FindMarks([][]highlight.LineTokens{lines}, needles, 0)
 	foundRe, reStats := highlight.FindRegexMarks([][]highlight.LineTokens{lines}, res, 0)
 	stats = append(stats, reStats...)
-	kept, _ := highlight.KeepSpans(found[0].Merge(foundRe[0]), keep)
+	kept, consumed := highlight.KeepSpans(found[0].Merge(foundRe[0]), keep)
 	matched := 0
 	for i, st := range stats {
 		matched += st.Matches
 		literal := i < len(stats)-len(reStats)
+		chars := utf8.RuneCountInString(st.Literal) // keep counts columns, not bytes
 		switch {
 		case st.Matches == 0 && literal:
 			rep.warn("--redact %q matched nothing", st.Literal)
@@ -1057,14 +1081,19 @@ func termRedact(lines []highlight.LineTokens, needles []string, res []*regexp.Re
 		case st.Matches == 0:
 			rep.warn("--redact-re %q matched nothing", st.Literal)
 			rep.helpf("nothing was masked — check the pattern")
-		case literal && keep > 0 && len(st.Literal) <= keep:
+		case literal && keep > 0 && chars <= keep:
 			return nil, rep.fail(exitUsage, kindUsage,
 				"--redact-keep %d leaves nothing hidden in --redact %q — lower it or drop it",
 				keep, st.Literal)
-		case literal && keep > 0 && len(st.Literal)-keep < 4:
+		case literal && keep > 0 && chars-keep < 4:
 			rep.warn("--redact-keep %d hides only %d char(s) of --redact %q",
-				keep, len(st.Literal)-keep, st.Literal)
+				keep, chars-keep, st.Literal)
 		}
+	}
+	// A regex match shorter than keep passes every per-literal check and is
+	// drawn in full; any consumed span is an exposed secret.
+	if consumed > 0 {
+		return nil, rep.fail(exitUsage, kindUsage, "%s", keepExposesMsg(keep, consumed))
 	}
 	if keep > 0 && matched > 0 && kept == nil {
 		return nil, rep.fail(exitUsage, kindUsage,

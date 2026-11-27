@@ -190,3 +190,67 @@ func TestSnapKeepsDecomposedAccents(t *testing.T) {
 		t.Errorf("marks = %+v, want the precomposed needle to match the decomposed text", rep.Marks)
 	}
 }
+
+// --redact-keep must never draw a whole secret. A non-ASCII literal passed
+// the old byte-length guard ("ñññññ" is 10 bytes, 5 characters), and a regex
+// match shorter than keep passed every per-literal guard: both shipped in
+// clear at exit 0 with no warning. Each mode now refuses with a usage error.
+func TestRedactKeepNeverExposesAWholeMatch(t *testing.T) {
+	const req = "GET / HTTP/1.1\nHost: a\nX-User: ñññññ\nX-T: abcdefghijkl\nX-R: tok_ab tok_abcdefghij\n\n"
+	const text = "user=ñññññ\ntoken=abcdefghijkl\na=tok_ab\nb=tok_abcdefghij\n"
+	multibyte := []string{"--redact", "ñññññ", "--redact", "abcdefghijkl", "--redact-keep", "5"}
+	shortRe := []string{"--redact-re", "tok_[a-z]+", "--redact-keep", "6"}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"snap multibyte literal", append([]string{"snap", "in.txt"}, multibyte...)},
+		{"snap short regex match", append([]string{"snap", "in.txt"}, shortRe...)},
+		{"term multibyte literal", append([]string{"term", "in.txt"}, multibyte...)},
+		{"term short regex match", append([]string{"term", "in.txt"}, shortRe...)},
+		{"http multibyte literal", append([]string{"http", "-r", "req.http"}, multibyte...)},
+		{"http short regex match", append([]string{"http", "-r", "req.http"}, shortRe...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range map[string]string{"in.txt": text, "req.http": req} {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, stdout, _ := runTaker(t, dir, append(tc.args, "-o", "o.png", "--json")...)
+			if code != exitUsage {
+				t.Errorf("exit = %d, want 2: a secret would be drawn in full\n%s", code, stdout)
+			}
+			if !strings.Contains(stdout, "--redact-keep") {
+				t.Errorf("the refusal does not name --redact-keep:\n%s", stdout)
+			}
+			if strings.Contains(stdout, "ñññ") || strings.Contains(stdout, "tok_ab") {
+				t.Errorf("the report leaks a redacted value:\n%s", stdout)
+			}
+			if _, err := os.Stat(filepath.Join(dir, "o.png")); err == nil {
+				t.Error("a PNG was written")
+			}
+		})
+	}
+}
+
+// The "hides only N char(s)" warning counts characters too: "pässwörd1" under
+// keep 8 hides one character, not the three a byte count claimed.
+func TestRedactKeepWarningCountsCharacters(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.txt")
+	if err := os.WriteFile(file, []byte("pw=pässwörd1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: filepath.Join(dir, "o.png"), JSON: true,
+			Redact: []string{"pässwörd1"}, RedactKeep: 8}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("snap = %d", code)
+	}
+	if !hasWarning(rep, "hides only 1 char(s)") {
+		t.Errorf("warnings = %v, want 'hides only 1 char(s)'", rep.Warnings)
+	}
+}
