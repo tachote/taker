@@ -611,11 +611,14 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 			// Centred in the code area: the count belongs to the view, not to
 			// a column of text — so it takes the UI face, whose line box fits
 			// the band; the code face's is taller than the band and its
-			// descenders crossed the bottom hairline. LineNumFg, not GapFg —
-			// it must stay readable.
+			// descenders crossed the bottom hairline. LineNumFg, not GapFg,
+			// and lifted to a readable contrast where the theme's grey is too
+			// dim: the count is the tool's claim about the view, not editor
+			// chrome to imitate.
 			label := gapLabel(vl.skipped)
 			lx := l.codeX + max(0, (l.totalWidth-l.codeX-textWidth(l.uiFace, label))/2)
-			drawString(img, l.uiFace, label, lx, l.baselineUI(y, gapRowHeight), ui.LineNumFg)
+			drawString(img, l.uiFace, label, lx, l.baselineUI(y, gapRowHeight),
+				readable(ui.LineNumFg, ui.TabText, ui.GapBg))
 			y += gapRowHeight
 			continue
 		}
@@ -1433,12 +1436,16 @@ func withFootnote(shot *image.NRGBA, text string, ui UIColors, m *metrics) *imag
 	return out
 }
 
-// drawFootnote writes the footnote lines into a strip starting at top.
+// drawFootnote writes the footnote lines into a strip starting at top. The
+// ink is the theme's muted grey, lifted where it is too dim to read on the
+// canvas: muted tells it apart from the caption, but provenance and a
+// redaction count that cannot be read are not declared at all.
 func drawFootnote(out *image.NRGBA, top int, lines []string, ui UIColors, m *metrics) {
 	lineH := m.lineHeightFor(footnoteLineMul)
+	ink := readable(ui.LineNumFg, ui.TabText, ui.ChromeBg)
 	for i, line := range lines {
 		y := top + footnotePadY + i*lineH
-		drawString(out, m.face, line, stripTextX, m.baselineIn(y, lineH), ui.LineNumFg)
+		drawString(out, m.face, line, stripTextX, m.baselineIn(y, lineH), ink)
 	}
 }
 

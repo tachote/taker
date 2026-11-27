@@ -917,3 +917,48 @@ func TestGapLabelStaysInsideItsBand(t *testing.T) {
 		}
 	}
 }
+
+// The footnote and the gap label are the tool's own voice — provenance, crop
+// extent, redaction count, skipped lines — and must read at WCAG AA on every
+// theme. A palette whose dim grey already passes keeps it exactly, so Burp
+// captures do not change colour.
+func TestToolTextIsReadableOnEveryTheme(t *testing.T) {
+	for name, th := range Themes {
+		u := th.UI
+		gap := readable(u.LineNumFg, u.TabText, u.GapBg)
+		foot := readable(u.LineNumFg, u.TabText, u.ChromeBg)
+		if c := contrast(gap, u.GapBg); c < 4.5 {
+			t.Errorf("%s: gap label contrast %.2f, want >= 4.5", name, c)
+		}
+		if c := contrast(foot, u.ChromeBg); c < 4.5 {
+			t.Errorf("%s: footnote contrast %.2f, want >= 4.5", name, c)
+		}
+		if contrast(u.LineNumFg, u.ChromeBg) >= 4.5 && foot != u.LineNumFg {
+			t.Errorf("%s: footnote colour moved although LineNumFg already reads", name)
+		}
+	}
+}
+
+// Rendered, not just computed: the footnote ink on nord must be the readable
+// colour, since nord's own line-number grey sits near 2:1 on its canvas.
+func TestFootnoteUsesReadableInk(t *testing.T) {
+	th := Themes["nord"]
+	lines, err := highlight.Tokenize("a\nb\nc\n", "text", "", th.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := Render(&Config{Lines: lines[:2], Title: "t", Theme: th, TotalLines: 3, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := readable(th.UI.LineNumFg, th.UI.TabText, th.UI.ChromeBg)
+	b := img.Bounds()
+	for y := b.Max.Y - 40; y < b.Max.Y; y++ {
+		for x := 0; x < b.Max.X; x++ {
+			if img.NRGBAAt(x, y) == want {
+				return
+			}
+		}
+	}
+	t.Errorf("no footnote pixel has the readable ink %v", want)
+}

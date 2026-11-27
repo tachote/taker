@@ -66,6 +66,31 @@ func contrast(a, b color.NRGBA) float64 {
 	return (la + 0.05) / (lb + 0.05)
 }
 
+// minToolContrast is WCAG AA for body text. The footnote and the gap label
+// are the tool speaking — provenance, crop extent, redactions, skipped lines —
+// and a dim theme grey left some of them near 2:1.
+const minToolContrast = 4.5
+
+// readable returns fg, or fg moved toward strong in 5% steps until it reaches
+// minToolContrast on bg. If strong itself falls short, it keeps going toward
+// black or white, whichever bg sets off better. A colour that already reads is
+// returned unchanged, so a theme only shifts where it was hard to read.
+func readable(fg, strong, bg color.NRGBA) color.NRGBA {
+	extreme := rgb(0xff, 0xff, 0xff)
+	if contrast(rgb(0, 0, 0), bg) > contrast(extreme, bg) {
+		extreme = rgb(0, 0, 0)
+	}
+	for _, to := range []color.NRGBA{strong, extreme} {
+		for i := 0; i <= 20; i++ {
+			if c := mix(fg, to, float64(i)/20); contrast(c, bg) >= minToolContrast {
+				return c
+			}
+		}
+		fg = to
+	}
+	return fg
+}
+
 // Standard red highlights work across all dark themes.
 var redHighlight = struct{ bg, border color.NRGBA }{
 	bg:     rgb(0x3d, 0x15, 0x15),
