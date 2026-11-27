@@ -186,7 +186,7 @@ func BenchmarkFindRegexMarksLongLine(b *testing.B) {
 	lines := linesOf(sb.String())
 	re := regexp.MustCompile(`"id":[0-9]+`)
 	b.ReportAllocs()
-	for b.Loop() {
+	for i := 0; i < b.N; i++ {
 		FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 3)
 	}
 }
