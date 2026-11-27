@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"io/fs"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2105,15 +2108,35 @@ func writePNG(img image.Image, path string, rep *reporter) error {
 	if fi, err := os.Stat(path); err == nil && fi.IsDir() {
 		return fmt.Errorf("%w: %s is a directory", errOutUsage, path)
 	}
-	if _, err := os.Stat(path); err == nil {
+	prev, statErr := os.Stat(path)
+	if statErr == nil {
 		rep.warn("overwriting existing %s", path)
 	}
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".taker-*.png")
+	tmp, err := createTemp(dir)
 	if err != nil {
-		return fmt.Errorf("create output: %w", err)
+		// A missing directory is a typo in -o, the caller's to fix — the
+		// same class as "-o is a directory".
+		if _, derr := os.Stat(dir); errors.Is(derr, fs.ErrNotExist) {
+			return fmt.Errorf("%w: directory %s does not exist", errOutUsage, dir)
+		}
+		// The temp name is an implementation detail — report the target.
+		var pe *fs.PathError
+		if errors.As(err, &pe) {
+			err = pe.Err
+		}
+		return fmt.Errorf("create output: %s: %v", path, err)
 	}
 	tmpName := tmp.Name()
+	// Overwriting keeps the mode the evidence file already had, rather than
+	// whatever the new one was created with.
+	if statErr == nil {
+		if err := tmp.Chmod(prev.Mode().Perm()); err != nil {
+			tmp.Close()
+			os.Remove(tmpName)
+			return fmt.Errorf("create output: %s: %v", path, err)
+		}
+	}
 
 	fail := func(err error) error {
 		tmp.Close()
@@ -2146,6 +2169,22 @@ func writePNG(img image.Image, path string, rep *reporter) error {
 	// On stderr: with --json, stdout carries the report and nothing else.
 	rep.note("wrote %s", path)
 	return nil
+}
+
+// createTemp opens a new hidden file in dir for writePNG to rename into
+// place. It is not os.CreateTemp: that creates 0600, and the rename carried
+// the mode onto the evidence, so a PNG meant to be shared could not be read
+// by anyone else. Created 0644 here, the umask still applies — the file gets
+// what any other new file in that directory would.
+func createTemp(dir string) (*os.File, error) {
+	for i := 0; ; i++ {
+		name := filepath.Join(dir, ".taker-"+strconv.FormatUint(uint64(rand.Uint32()), 10)+".png")
+		f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644)
+		if errors.Is(err, fs.ErrExist) && i < 100 {
+			continue
+		}
+		return f, err
+	}
 }
 
 // samePath reports whether two paths name the same file — `-o` set to the

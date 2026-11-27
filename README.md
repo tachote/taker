@@ -105,7 +105,7 @@ taker [file] [flags]
 | `--theme` | `-T` | `vscode-dark` | Color theme |
 | `--chrome` | | `editor` | Window style: `editor` (bare pane) or `window` (title bar + traffic lights) |
 | `--shadow` | | false | Drop shadow under the window |
-| `--output` | `-o` | `output.png` | Output PNG path |
+| `--output` | `-o` | `output.png` | Output PNG path. Written atomically (temp file, then rename). A new file gets `0644` under your umask; an overwritten one keeps its mode. A directory that does not exist is a usage error (exit 2) |
 | `--dry-run` | | | Validate and report without writing the PNG |
 | `--list-themes` | | | Print available themes and exit |
 | `--json` | | | Write a machine-readable report to stdout. Human messages stay on stderr |

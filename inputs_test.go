@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -134,5 +135,33 @@ func TestSnapRefusesEmptyInput(t *testing.T) {
 	code, stdout, _ := runTaker(t, dir, "-o", filepath.Join(dir, "s.png"), "--json")
 	if code != exitInput || !strings.Contains(stdout, "stdin is empty") {
 		t.Errorf("empty stdin = %d\n%s\nwant exit 3 'stdin is empty'", code, stdout)
+	}
+}
+
+// A create failure names the target, not the hidden temp file, and a missing
+// -o directory is the caller's mistake (exit 2).
+func TestWritePNGErrors(t *testing.T) {
+	dir := t.TempDir()
+	file := writeInput(t, dir, "a.py", "x = 1\n")
+	snap := func(out string) (int, Report) {
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Output: out, JSON: true}), r)
+		})
+		return code, rep
+	}
+	code, rep := snap(filepath.Join(dir, "no", "such", "x.png"))
+	if code != exitUsage || rep.Error == nil || !strings.Contains(rep.Error.Message, "does not exist") {
+		t.Errorf("missing -o directory = %d (%v), want exit 2 naming the directory", code, rep.Error)
+	}
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
+		ro := filepath.Join(dir, "ro")
+		if err := os.Mkdir(ro, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		code, rep = snap(filepath.Join(ro, "x.png"))
+		if code != exitFail || rep.Error == nil || strings.Contains(rep.Error.Message, ".taker-") ||
+			!strings.Contains(rep.Error.Message, "x.png") {
+			t.Errorf("read-only dir = %d (%v), want exit 1 naming x.png and not the temp file", code, rep.Error)
+		}
 	}
 }
