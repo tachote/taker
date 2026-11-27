@@ -965,3 +965,13 @@ func TestMarkupDelimitersArePlainText(t *testing.T) {
 		t.Errorf("json key with markup was split: %+v", got[3].Tokens)
 	}
 }
+
+// A single pane's render error names the panel, the way a pair's does, so the
+// CLI message says which side was too tall.
+func TestSinglePaneErrorNamesPanel(t *testing.T) {
+	huge := "HTTP/1.1 200 OK\n\n" + strings.Repeat("line\n", 1200)
+	_, err := RenderHTTP(&HTTPConfig{Response: huge})
+	if err == nil || !strings.HasPrefix(err.Error(), "render Response: ") {
+		t.Errorf("err = %v, want it prefixed with the panel name", err)
+	}
+}

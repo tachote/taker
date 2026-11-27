@@ -305,14 +305,6 @@ func isStartLine(s string) bool {
 		strings.HasPrefix(parts[2], "HTTP/")
 }
 
-func lineText(lt highlight.LineTokens) string {
-	var b strings.Builder
-	for _, tok := range lt.Tokens {
-		b.WriteString(tok.Text)
-	}
-	return b.String()
-}
-
 func colourToken(text string, c color.NRGBA) highlight.Token {
 	return highlight.Token{Text: text, R: c.R, G: c.G, B: c.B}
 }
@@ -354,7 +346,7 @@ func splitHeader(text string) (name, value string, ok bool) {
 }
 
 func isCookieHeader(name string) bool {
-	switch strings.ToLower(strings.Trim(strings.TrimSpace(name), ":")) {
+	switch headerKey(name) {
 	case "set-cookie", "set-cookie2", "cookie":
 		return true
 	}
@@ -386,7 +378,7 @@ func burpCookieTokens(name, value string) []highlight.Token {
 			colourToken(d, burpParamValue))
 	}
 
-	if strings.EqualFold(strings.Trim(strings.TrimSpace(name), ":"), "cookie") {
+	if headerKey(name) == "cookie" {
 		for {
 			seg, tail, found := strings.Cut(rest, ";")
 			pair(seg)
@@ -740,19 +732,18 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 
 	// Tabs read the whole capture, not the trimmed view: in Burp an editor tab
 	// reflects the message it holds, not how far you scrolled.
+	panel := func(title string, lines []highlight.LineTokens, hl, red highlight.Marks, raw string) *Config {
+		return &Config{
+			Lines: lines, Title: title, HighlightLines: hl, RedactRegions: red,
+			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true,
+			httpTabs: burpTabs(title, raw), Warn: cfg.Warn,
+		}
+	}
 	var pane *image.NRGBA
 	redacted := 0
 	if hasReq && hasRes {
-		req := &Config{
-			Lines: reqLines, Title: "Request", HighlightLines: reqHL, RedactRegions: reqRedact,
-			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true,
-			httpTabs: burpTabs("Request", cfg.Request), Warn: cfg.Warn,
-		}
-		res := &Config{
-			Lines: resLines, Title: "Response", HighlightLines: resHL, RedactRegions: resRedact,
-			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true,
-			httpTabs: burpTabs("Response", cfg.Response), Warn: cfg.Warn,
-		}
+		req := panel("Request", reqLines, reqHL, reqRedact, cfg.Request)
+		res := panel("Response", resLines, resHL, resRedact, cfg.Response)
 
 		reqImg, resImg, err := renderPair(req, res)
 		if err != nil {
@@ -765,19 +756,15 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	} else {
 		// One side only: the splitter would frame a pane whose other half does
 		// not exist. Render the message that is evidence.
-		single := &Config{
-			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true, Warn: cfg.Warn,
-		}
+		var single *Config
 		if hasReq {
-			single.Title, single.Lines, single.HighlightLines, single.RedactRegions = "Request", reqLines, reqHL, reqRedact
-			single.httpTabs = burpTabs("Request", cfg.Request)
+			single = panel("Request", reqLines, reqHL, reqRedact, cfg.Request)
 		} else {
-			single.Title, single.Lines, single.HighlightLines, single.RedactRegions = "Response", resLines, resHL, resRedact
-			single.httpTabs = burpTabs("Response", cfg.Response)
+			single = panel("Response", resLines, resHL, resRedact, cfg.Response)
 		}
 		img, err := Render(single)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("render %s: %w", single.Title, err)
 		}
 		redacted = single.Redacted
 		pane = img
