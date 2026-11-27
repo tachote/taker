@@ -6,8 +6,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // captureStderr swaps the process's stderr for a pipe while fn runs, so a test
@@ -705,5 +708,154 @@ func TestShortFragmentsAreNotSecrets(t *testing.T) {
 	}
 	if caption != "task skip" {
 		t.Errorf("caption scrubbed to %q, want it intact", caption)
+	}
+}
+
+// bigSource is a few hundred KB of ordinary code holding one token — the
+// size of a vendored or minified file an analyst renders an excerpt of. addInput
+// scrubs the whole input, so the scrub must stay linear in it.
+func bigSource(lines int) string {
+	var b strings.Builder
+	for i := 0; i < lines; i++ {
+		if i == lines/2 {
+			b.WriteString("    token = \"tok_9F3KQ7ZP2M\"  # the one secret\n")
+			continue
+		}
+		b.WriteString("    result = compute_value(alpha, beta, gamma)  # filler\n")
+	}
+	return b.String()
+}
+
+func BenchmarkScrubRegex(b *testing.B) {
+	r := newReporter("", "snap")
+	r.setSecrets([]string{"hunter2-literal"})
+	r.secretRes = []*regexp.Regexp{regexp.MustCompile(`tok_[A-Z0-9]+`)}
+	s := bigSource(5000) // ~270 KB
+	b.SetBytes(int64(len(s)))
+	b.ReportAllocs()
+	for range b.N {
+		r.scrub(s)
+	}
+}
+
+func BenchmarkScrubLiterals(b *testing.B) {
+	r := newReporter("", "snap")
+	r.setSecrets([]string{"tok_9F3KQ7ZP2M", "hunter2-literal", `a"quoted\secret`})
+	s := bigSource(5000)
+	b.SetBytes(int64(len(s)))
+	b.ReportAllocs()
+	for range b.N {
+		r.scrub(s)
+	}
+}
+
+// scrubSuffixRef is the scrub that asked each pattern for a match anchored at
+// every byte of the remaining string — correct for context-free patterns but
+// quadratic. It stays here as the reference the linear scrub must agree with.
+func scrubSuffixRef(r *reporter, s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "<redacted>") {
+			b.WriteString("<redacted>")
+			i += len("<redacted>")
+			continue
+		}
+		t, best := s[i:], 0
+		for _, sec := range r.secrets {
+			if strings.HasPrefix(t, sec) && len(sec) > best {
+				best = len(sec)
+			}
+			if q := strconv.Quote(sec); strings.HasPrefix(t, q) && len(q) > best {
+				best = len(q)
+			}
+		}
+		for _, re := range r.secretRes {
+			if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 && loc[1] > best {
+				best = loc[1]
+			}
+		}
+		if best > 0 {
+			b.WriteString("<redacted>")
+			i += best
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// The linear scrub masks what the per-byte scan masked for patterns that do
+// not look at context, including the overlaps where a literal or a marker ends
+// inside a pattern match and the match's tail must still go. Where the two
+// differ, want says what the linear scrub must produce instead, and why.
+func TestScrubMatchesSuffixScan(t *testing.T) {
+	cases := []struct {
+		lits []string
+		res  []string
+		in   string
+		want string
+	}{
+		{[]string{"hunter2"}, []string{`tok_[A-Z0-9]+`}, "a hunter2 b tok_AB12 c \"hunter2\" tok_ d", ""},
+		{nil, []string{`[0-9a-f]{32}`}, "k = 9e107d9d372bb6826bd81d3542a419d6 and 9e107d9d372bb6826bd81d3542a419d6ff", ""},
+		// A literal that is a prefix of a longer pattern match: the tail goes too.
+		{[]string{"tok_AB"}, []string{`tok_[A-Z0-9]+`}, "x tok_AB12CD y", ""},
+		// A literal that starts before a pattern match and ends inside it: the
+		// per-byte scan resumed after the literal, found no "tok_" there and
+		// left the match's tail _ZZ9 readable. The whole match is the secret.
+		{[]string{"xx-tok"}, []string{`tok_[A-Z0-9]+`}, "a xx-tok_ZZ9 b", "a <redacted><redacted> b"},
+		// A pattern that runs into an existing marker keeps masking past it.
+		{nil, []string{`\S+`}, "<redacted>abc def", ""},
+		{[]string{"a"}, []string{`a+`}, "baaab aaa", ""},
+		{nil, []string{`(?s)BEGIN.*?END`}, "pre BEGIN\nkey\nEND post", ""},
+		{[]string{"sekret-token"}, nil, `var k = "sekret-token"` + "\n", ""},
+	}
+	for _, tc := range cases {
+		r := newReporter("", "snap")
+		r.setSecrets(tc.lits)
+		for _, p := range tc.res {
+			r.secretRes = append(r.secretRes, regexp.MustCompile(p))
+		}
+		got, want := r.scrub(tc.in), tc.want
+		if want == "" {
+			want = scrubSuffixRef(r, tc.in)
+		}
+		if got != want {
+			t.Errorf("scrub(%q) lits=%q res=%q\n got %q\nwant %q", tc.in, tc.lits, tc.res, got, want)
+		}
+		if again := r.scrub(got); again != got {
+			t.Errorf("scrub is not idempotent: %q -> %q", got, again)
+		}
+	}
+}
+
+// A pattern now sees its real context, the same per-line context the image
+// matches it in: ^ is a line start, not wherever the scan happens to be. The
+// per-byte scan treated every position as a start of text, so it masked
+// mid-line text the image left visible — and both must agree on what is a
+// secret, or the input hash and the image tell different stories.
+func TestScrubPatternContextMatchesTheImage(t *testing.T) {
+	r := newReporter("", "snap")
+	r.secretRes = []*regexp.Regexp{regexp.MustCompile(`^Authorization: \S+`)}
+	in := "GET / HTTP/1.1\nAuthorization: Bearer-abc\nX-Note: see Authorization: x\n"
+	want := "GET / HTTP/1.1\n<redacted>\nX-Note: see Authorization: x\n"
+	if got := r.scrub(in); got != want {
+		t.Errorf("scrub = %q, want %q", got, want)
+	}
+}
+
+// The scrub runs over every input in full, so it must stay linear: the
+// per-byte scan took ~10 s on this input.
+func TestScrubIsLinear(t *testing.T) {
+	r := newReporter("", "snap")
+	r.secretRes = []*regexp.Regexp{regexp.MustCompile(`tok_[A-Z0-9]+`)}
+	s := bigSource(5000)
+	start := time.Now()
+	got := r.scrub(s)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("scrub of %d bytes took %v", len(s), d)
+	}
+	if strings.Contains(got, "tok_9F3KQ7ZP2M") || strings.Count(got, "<redacted>") != 1 {
+		t.Error("the one token was not masked exactly once")
 	}
 }

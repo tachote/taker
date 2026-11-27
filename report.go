@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -270,6 +271,7 @@ func (r *reporter) scrub(s string) string {
 	if len(r.secrets) == 0 && len(r.secretRes) == 0 {
 		return s
 	}
+	m := r.matcherFor(s)
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -282,7 +284,7 @@ func (r *reporter) scrub(s string) string {
 			i += len("<redacted>")
 			continue
 		}
-		if n := r.matchLen(s[i:]); n > 0 {
+		if n := m.matchLen(s, i); n > 0 {
 			b.WriteString("<redacted>")
 			i += n
 			continue
@@ -293,26 +295,76 @@ func (r *reporter) scrub(s string) string {
 	return b.String()
 }
 
-// matchLen returns how many leading bytes of t one needle covers — the
-// longest literal, its %q-quoted twin, or a pattern anchored at position 0.
-// Zero-width pattern matches return 0, so a degenerate regex can't consume.
-func (r *reporter) matchLen(t string) int {
-	best := 0
+// scrubMatcher is what one scrub call knows about its input, computed once
+// up front. Asking each pattern for a match anchored at every byte rescanned
+// the whole remaining string per byte — quadratic, 10 s for a 270 KB file
+// with one --redact-re — and quoting every literal per byte cost almost as
+// much again in allocations.
+type scrubMatcher struct {
+	lits  []string // the literals and their %q-quoted twins
+	spans [][2]int // every non-empty pattern match in the input, by start
+	next  int      // first span whose start the scan has not reached
+	reach int      // furthest end of any span starting at or before the scan
+}
+
+// matcherFor finds the pattern matches on the whole input instead of on a
+// suffix, so a pattern keeps its real context: \b and ^ see the byte before
+// the match, which a suffix hid. Matches are also taken line by line — the
+// image matches each line on its own, so ^ and $ there mean line start and
+// end, and a secret the image masks has to be masked here too, or the input
+// hash would cover it in clear.
+func (r *reporter) matcherFor(s string) *scrubMatcher {
+	m := &scrubMatcher{}
 	for _, sec := range r.secrets {
-		if sec == "" {
-			continue
+		if sec != "" {
+			m.lits = append(m.lits, sec, strconv.Quote(sec))
 		}
-		if strings.HasPrefix(t, sec) && len(sec) > best {
-			best = len(sec)
-		}
-		if q := strconv.Quote(sec); strings.HasPrefix(t, q) && len(q) > best {
-			best = len(q)
+	}
+	add := func(re *regexp.Regexp, text string, off int) {
+		for _, loc := range re.FindAllStringIndex(text, -1) {
+			// A zero-width match covers nothing, so a degenerate regex
+			// cannot consume text.
+			if loc[1] > loc[0] {
+				m.spans = append(m.spans, [2]int{off + loc[0], off + loc[1]})
+			}
 		}
 	}
 	for _, re := range r.secretRes {
-		if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 && loc[1] > best {
-			best = loc[1]
+		add(re, s, 0)
+		if !strings.Contains(s, "\n") {
+			continue
 		}
+		for off := 0; off < len(s); {
+			n := strings.IndexByte(s[off:], '\n')
+			if n < 0 {
+				n = len(s) - off
+			}
+			add(re, s[off:off+n], off)
+			off += n + 1
+		}
+	}
+	slices.SortFunc(m.spans, func(a, b [2]int) int { return a[0] - b[0] })
+	return m
+}
+
+// matchLen returns how many bytes from s[i] one needle covers — the longest
+// literal, its %q-quoted twin, or the rest of any pattern match that covers
+// position i. Covering, not only starting at i: a literal or a marker can end
+// in the middle of a pattern match, and the match's tail is still part of the
+// secret. Calls must come with i non-decreasing, as scrub's scan makes them.
+func (m *scrubMatcher) matchLen(s string, i int) int {
+	best := 0
+	for _, lit := range m.lits {
+		if len(lit) > best && strings.HasPrefix(s[i:], lit) {
+			best = len(lit)
+		}
+	}
+	for m.next < len(m.spans) && m.spans[m.next][0] <= i {
+		m.reach = max(m.reach, m.spans[m.next][1])
+		m.next++
+	}
+	if m.reach-i > best {
+		best = m.reach - i
 	}
 	return best
 }
