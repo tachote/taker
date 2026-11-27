@@ -70,7 +70,7 @@ go build -o taker .
 - **Terminal evidence mode** — `taker exec -- id` runs a command and renders the prompt plus output under a terminal window; `taker term` renders a saved transcript
 - **Provenance built in** — every PNG embeds the command line, timestamp, version and input SHA-256 as `tEXt` chunks; `--json` reports the same fields
 - **Preflight for agents** — `--dry-run` validates the whole render and reports the image's dimensions without writing it
-- **Stdin support** — pipe code directly without creating a temp file; if nothing arrives on stdin within 300ms it fails as `usage` instead of hanging on an empty pipe
+- **Stdin support** — pipe code directly without creating a temp file; if nothing arrives on stdin within 300ms it fails as `usage` instead of hanging on an open pipe; a pipe closed with nothing in it fails as `input` (`stdin is empty`)
 - **Self-contained binary** — JetBrains Mono and Symbols Nerd Font are embedded; no runtime dependencies
 
 ---
@@ -519,7 +519,8 @@ usage dump on stderr. A failed run never writes an image.
 
 Guards against shipping a screenshot that proves nothing:
 
-- **No matching lines** → error, exit 4 (see Exit codes). `-n 500-600` on a 100-line file will not emit a blank PNG. Same for `--nr` / `--ns`, and for an empty request or response file.
+- **No matching lines** → error, exit 4 (see Exit codes). `-n 500-600` on a 100-line file will not emit a blank PNG. Same for `--nr` / `--ns`.
+- **Empty input** → error, exit 3. An empty or whitespace-only file, `--git` blob or stdin, request or response, or transcript is refused instead of rendered as a blank pane.
 - **Body too long to look at** → a 3000-line response renders 129 000px tall, past the 32 767px browsers decode. `taker` refuses before allocating (which would cost about a gigabyte) and names the fix; past 8 000px it warns but still renders, because that call is yours.
 - **Nothing highlighted** → warning on stderr. The image is still written, but you are told the `-H` / `--hr` / `--hs` lines are not in the output.
 - **`-m` matched nothing** → warning naming the literal. Shipping a screenshot whose marker silently missed is the failure this tool exists to prevent.

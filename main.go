@@ -350,7 +350,11 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		// forgot the file hands us an open pipe nobody will write to — probe
 		// instead of blocking forever on a read that never comes.
 		r := bufio.NewReader(os.Stdin)
-		if !stdinHasData(r, 300*time.Millisecond) {
+		switch probeStdin(r, 300*time.Millisecond) {
+		case stdinEOF:
+			rep.helpf("taker snap <file> -o out.png — or pipe the source on stdin")
+			return rep.fail(exitInput, kindInput, "stdin is empty")
+		case stdinStalled:
 			rep.helpf("taker snap <file> -o out.png — or pipe the source on stdin")
 			return rep.fail(exitUsage, kindUsage, "no input: stdin produced no data within 300ms")
 		}
@@ -374,6 +378,13 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	// spliced by an ANSI escape would otherwise stay legible while "matched
 	// nothing" warned, and the hash would cover bytes the image does not show.
 	src = normalizeInput(src, rep)
+	// http and term refuse an empty input; a blank editor pane at exit 0 is
+	// the same silent success the "no lines matched" guard exists to stop.
+	// Checked after normalizing: a file of only BOMs or ANSI codes draws
+	// nothing too.
+	if len(bytes.TrimSpace(src)) == 0 {
+		return rep.fail(exitInput, kindInput, "%s is empty", inputName)
+	}
 	if origin.Ref != "" {
 		rep.note("%s", origin.Ref)
 	}
@@ -1366,22 +1377,40 @@ func splitNeedle(raw, quoted string, lits []string, res, frags []*regexp.Regexp)
 	return ""
 }
 
-// stdinHasData reports whether at least one byte is readable within the
-// grace period. A real producer — cat file | taker — has data in the pipe
-// buffer before the process even starts; a harness that opened stdin and
-// never writes stalls forever, which is the failure this exists to catch.
-// Peek does not consume, so a fast probe leaves the stream intact.
-func stdinHasData(r *bufio.Reader, grace time.Duration) bool {
-	ch := make(chan bool, 1)
+// stdinState is what a probe of stdin found.
+type stdinState int
+
+const (
+	stdinData    stdinState = iota // at least one byte is readable
+	stdinEOF                       // the producer closed the pipe without writing
+	stdinStalled                   // nothing within the grace period, or unreadable
+)
+
+// probeStdin reports whether at least one byte is readable within the grace
+// period. A real producer — cat file | taker — has data in the pipe buffer
+// before the process even starts; a harness that opened stdin and never
+// writes stalls forever, which is the failure this exists to catch. An
+// immediate EOF is neither: the input was empty, not slow, and saying "no
+// data within 300ms" sent the caller looking for the wrong problem. Peek does
+// not consume, so a fast probe leaves the stream intact.
+func probeStdin(r *bufio.Reader, grace time.Duration) stdinState {
+	ch := make(chan stdinState, 1)
 	go func() {
 		_, err := r.Peek(1)
-		ch <- err == nil
+		switch {
+		case err == nil:
+			ch <- stdinData
+		case errors.Is(err, io.EOF):
+			ch <- stdinEOF
+		default:
+			ch <- stdinStalled
+		}
 	}()
 	select {
-	case ok := <-ch:
-		return ok
+	case st := <-ch:
+		return st
 	case <-time.After(grace):
-		return false
+		return stdinStalled
 	}
 }
 

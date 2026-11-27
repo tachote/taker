@@ -223,9 +223,10 @@ func TestExecReportCarriesChildExit(t *testing.T) {
 	}
 }
 
-// stdinHasData distinguishes a live producer from a pipe nobody will write:
-// buffered data returns instantly, an empty pipe trips the grace period.
-func TestStdinHasData(t *testing.T) {
+// probeStdin distinguishes a live producer from a pipe nobody will write:
+// buffered data returns instantly, an empty open pipe trips the grace period,
+// and a pipe closed with nothing in it is empty input, not a slow one.
+func TestProbeStdin(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -235,8 +236,8 @@ func TestStdinHasData(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.Close()
-	if !stdinHasData(bufio.NewReader(r), 200*time.Millisecond) {
-		t.Error("data already in the pipe should report ready")
+	if got := probeStdin(bufio.NewReader(r), 200*time.Millisecond); got != stdinData {
+		t.Errorf("data already in the pipe = %v, want ready", got)
 	}
 
 	r2, w2, err := os.Pipe()
@@ -246,11 +247,25 @@ func TestStdinHasData(t *testing.T) {
 	defer r2.Close()
 	defer w2.Close() // write end held open, nothing written — the agent's pipe
 	start := time.Now()
-	if stdinHasData(bufio.NewReader(r2), 120*time.Millisecond) {
-		t.Error("an empty open pipe should report no data")
+	if got := probeStdin(bufio.NewReader(r2), 120*time.Millisecond); got != stdinStalled {
+		t.Errorf("an empty open pipe = %v, want stalled", got)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("the probe should not block on an empty pipe")
+	}
+
+	r3, w3, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Close()
+	w3.Close()
+	start = time.Now()
+	if got := probeStdin(bufio.NewReader(r3), 2*time.Second); got != stdinEOF {
+		t.Errorf("a closed empty pipe = %v, want EOF", got)
+	}
+	if time.Since(start) > time.Second {
+		t.Error("EOF should be reported at once, not after the grace period")
 	}
 }
 

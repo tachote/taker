@@ -110,3 +110,29 @@ func TestInvalidUTF8IsWarned(t *testing.T) {
 		}
 	})
 }
+
+// An empty or whitespace-only file rendered a blank pane at exit 0; http and
+// term already refuse empty input, and the README lists "empty" under exit 3.
+func TestSnapRefusesEmptyInput(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"empty.go": "", "ws.go": "\n\n  \t\n", "bom.go": "\ufeff\n",
+	} {
+		file := writeInput(t, dir, name, body)
+		out := filepath.Join(dir, name+".png")
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Output: out, JSON: true}), r)
+		})
+		if code != exitInput || rep.Error == nil || !strings.Contains(rep.Error.Message, "is empty") {
+			t.Errorf("%s = %d (%v), want exit 3 'is empty'", name, code, rep.Error)
+		}
+		if _, err := os.Stat(out); !os.IsNotExist(err) {
+			t.Errorf("%s: a PNG was written for empty input", name)
+		}
+	}
+	// stdin at EOF is empty, not slow: exit 3, not the 300ms usage error.
+	code, stdout, _ := runTaker(t, dir, "-o", filepath.Join(dir, "s.png"), "--json")
+	if code != exitInput || !strings.Contains(stdout, "stdin is empty") {
+		t.Errorf("empty stdin = %d\n%s\nwant exit 3 'stdin is empty'", code, stdout)
+	}
+}
