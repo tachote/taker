@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -156,7 +158,7 @@ type reporter struct {
 	out    io.Writer // stdout: the report, the theme list, nothing else
 	format string    // "", "json" or "toon"
 	rep    Report
-	metaKV [][2]string // PNG tEXt chunks beyond the always-present set
+	metaKV [][2]string // PNG text chunks beyond the always-present set
 	// secrets are the --redact literals of this run: the image hides them,
 	// so every string that leaves the process — warnings, help, errors,
 	// provenance — hides them too. Set as early as the flags are known.
@@ -231,7 +233,7 @@ func (r *reporter) setSecretsAll(secrets, literals []string) {
 		for _, part := range strings.FieldsFunc(sec, func(r rune) bool {
 			return strings.ContainsRune("-:=,/.; \t", r)
 		}) {
-			if len(part) >= 2 && part != sec {
+			if len(part) >= 3 && part != sec {
 				add(part)
 				frags = append(frags, part)
 			}
@@ -270,6 +272,7 @@ func (r *reporter) scrub(s string) string {
 	if len(r.secrets) == 0 && len(r.secretRes) == 0 {
 		return s
 	}
+	m := r.matcherFor(s)
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -282,7 +285,7 @@ func (r *reporter) scrub(s string) string {
 			i += len("<redacted>")
 			continue
 		}
-		if n := r.matchLen(s[i:]); n > 0 {
+		if n := m.matchLen(s, i); n > 0 {
 			b.WriteString("<redacted>")
 			i += n
 			continue
@@ -293,26 +296,76 @@ func (r *reporter) scrub(s string) string {
 	return b.String()
 }
 
-// matchLen returns how many leading bytes of t one needle covers — the
-// longest literal, its %q-quoted twin, or a pattern anchored at position 0.
-// Zero-width pattern matches return 0, so a degenerate regex can't consume.
-func (r *reporter) matchLen(t string) int {
-	best := 0
+// scrubMatcher is what one scrub call knows about its input, computed once
+// up front. Asking each pattern for a match anchored at every byte rescanned
+// the whole remaining string per byte — quadratic, 10 s for a 270 KB file
+// with one --redact-re — and quoting every literal per byte cost almost as
+// much again in allocations.
+type scrubMatcher struct {
+	lits  []string // the literals and their %q-quoted twins
+	spans [][2]int // every non-empty pattern match in the input, by start
+	next  int      // first span whose start the scan has not reached
+	reach int      // furthest end of any span starting at or before the scan
+}
+
+// matcherFor finds the pattern matches on the whole input instead of on a
+// suffix, so a pattern keeps its real context: \b and ^ see the byte before
+// the match, which a suffix hid. Matches are also taken line by line — the
+// image matches each line on its own, so ^ and $ there mean line start and
+// end, and a secret the image masks has to be masked here too, or the input
+// hash would cover it in clear.
+func (r *reporter) matcherFor(s string) *scrubMatcher {
+	m := &scrubMatcher{}
 	for _, sec := range r.secrets {
-		if sec == "" {
-			continue
+		if sec != "" {
+			m.lits = append(m.lits, sec, strconv.Quote(sec))
 		}
-		if strings.HasPrefix(t, sec) && len(sec) > best {
-			best = len(sec)
-		}
-		if q := strconv.Quote(sec); strings.HasPrefix(t, q) && len(q) > best {
-			best = len(q)
+	}
+	add := func(re *regexp.Regexp, text string, off int) {
+		for _, loc := range re.FindAllStringIndex(text, -1) {
+			// A zero-width match covers nothing, so a degenerate regex
+			// cannot consume text.
+			if loc[1] > loc[0] {
+				m.spans = append(m.spans, [2]int{off + loc[0], off + loc[1]})
+			}
 		}
 	}
 	for _, re := range r.secretRes {
-		if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 && loc[1] > best {
-			best = loc[1]
+		add(re, s, 0)
+		if !strings.Contains(s, "\n") {
+			continue
 		}
+		for off := 0; off < len(s); {
+			n := strings.IndexByte(s[off:], '\n')
+			if n < 0 {
+				n = len(s) - off
+			}
+			add(re, s[off:off+n], off)
+			off += n + 1
+		}
+	}
+	slices.SortFunc(m.spans, func(a, b [2]int) int { return a[0] - b[0] })
+	return m
+}
+
+// matchLen returns how many bytes from s[i] one needle covers — the longest
+// literal, its %q-quoted twin, or the rest of any pattern match that covers
+// position i. Covering, not only starting at i: a literal or a marker can end
+// in the middle of a pattern match, and the match's tail is still part of the
+// secret. Calls must come with i non-decreasing, as scrub's scan makes them.
+func (m *scrubMatcher) matchLen(s string, i int) int {
+	best := 0
+	for _, lit := range m.lits {
+		if len(lit) > best && strings.HasPrefix(s[i:], lit) {
+			best = len(lit)
+		}
+	}
+	for m.next < len(m.spans) && m.spans[m.next][0] <= i {
+		m.reach = max(m.reach, m.spans[m.next][1])
+		m.next++
+	}
+	if m.reach-i > best {
+		best = m.reach - i
 	}
 	return best
 }
@@ -324,19 +377,19 @@ func (r *reporter) matchLen(t string) int {
 // Warnings and help are scrubbed at format time, so they never carry the
 // literal regardless of ordering.
 func (r *reporter) scrubSecrets() {
-	// ANSI escapes inside a recorded command split a needle the same way they
-	// do inside a file — normalize before masking or `mR9!^[[31mkXv2` keeps
-	// both halves readable in the PNG's own tEXt chunk.
-	deansi := func(s string) string {
-		b, _ := stripANSI([]byte(s))
-		return string(b)
-	}
-	r.rep.Command = scrubRedactArgs(r.scrub(deansi(r.rep.Command)))
+	r.rep.Command = r.scrubMeta(r.rep.Command)
 	if r.rep.Source != nil {
 		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
 	}
 	for i, kv := range r.metaKV {
-		r.metaKV[i][1] = scrubRedactArgs(r.scrub(deansi(kv[1])))
+		// The input hashes are computed over content addInput already masked,
+		// so they cannot carry a secret. Scrubbing them again only destroys
+		// provenance: a hex --redact-re wipes the sum, a short fragment cuts
+		// a hole in it, and the PNG stops agreeing with the report.
+		if strings.HasPrefix(kv[0], "taker:sha256") {
+			continue
+		}
+		r.metaKV[i][1] = r.scrubMeta(kv[1])
 	}
 	for i, w := range r.rep.Warnings {
 		r.rep.Warnings[i] = r.scrub(w)
@@ -345,6 +398,33 @@ func (r *reporter) scrubSecrets() {
 		r.rep.Marks[i].Needle = r.scrub(m.Needle)
 	}
 	r.rep.Output = r.scrub(r.rep.Output)
+}
+
+// scrubMeta masks one provenance value. ANSI escapes inside a recorded
+// command split a needle the same way they do inside a file — normalize
+// before masking or `mR9!^[[31mkXv2` keeps both halves readable in the PNG's
+// own text chunk.
+func (r *reporter) scrubMeta(v string) string {
+	b, _ := stripANSI([]byte(v))
+	return scrubRedactArgs(r.scrub(string(b)))
+}
+
+// pngMeta is the metadata the PNG carries beyond version, time and command:
+// the input hashes, and where the input came from — the same source path and
+// revision the report states. Without them a detached image proves its
+// version only in footnote pixels, which no tool can check. An exec run is
+// left out of taker:source: taker:exec already names its command line.
+func (r *reporter) pngMeta() [][2]string {
+	meta := slices.Clone(r.metaKV)
+	if src := r.rep.Source; src != nil {
+		if src.Path != "" && src.Kind != "exec" {
+			meta = append(meta, [2]string{"taker:source", r.scrubMeta(src.Kind + ":" + src.Path)})
+		}
+		if src.Rev != "" {
+			meta = append(meta, [2]string{"taker:git-revision", src.Rev})
+		}
+	}
+	return meta
 }
 
 // helpf records the command that fixes or completes the current situation.
@@ -438,19 +518,25 @@ func (r *reporter) emit(code int) int {
 	r.scrubSecrets()
 	switch {
 	case r.format == "json":
-		buf, err := json.MarshalIndent(r.rep, "", "  ")
-		if err != nil {
+		// No HTML escaping: this is not going into a web page, and the
+		// escaped form turns every <redacted> marker and every && of a shell
+		// line into \u003c… noise a consumer greps past.
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(r.rep); err != nil {
 			r.note("could not encode the json report: %v", err)
 			return code
 		}
-		fmt.Fprintln(r.out, string(buf))
+		r.out.Write(buf.Bytes()) // Encode already ended it with a newline
 	case r.format == "toon" || !r.rep.OK:
 		text, err := r.reportTOON()
 		if err != nil {
 			r.note("could not encode the toon report: %v", err)
 			return code
 		}
-		fmt.Fprintln(r.out, text)
+		fmt.Fprint(r.out, text) // every TOON line already ends in a newline
 	}
 	return code
 }
