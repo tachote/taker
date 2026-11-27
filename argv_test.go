@@ -301,3 +301,62 @@ func TestMarkKeepsItsCommas(t *testing.T) {
 		})
 	}
 }
+
+// A refused command line still gets the right mode, format and help: the
+// mode comes from the first positional token (skipping flags and their
+// values), the format from --json/--toon in any spelling kong accepts, and
+// the help names the mode's own --help plus its flags inline.
+func TestParseErrorErgonomics(t *testing.T) {
+	app := newParser().Model
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"http", "--bogus"}, "http"},
+		{[]string{"--json", "http", "-r", "r.http", "--bogus"}, "http"},
+		{[]string{"app.py", "-t", "http", "--bogus"}, "snap"},
+		{[]string{"-t", "exec", "app.py", "--bogus"}, "snap"},
+		{[]string{"-o=x.png", "term", "--bogus"}, "term"},
+		{[]string{"--bogus"}, "snap"},
+		{[]string{"--", "exec"}, "exec"},
+	} {
+		if got := parseErrorMode(app, tc.args); got != tc.want {
+			t.Errorf("parseErrorMode(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--json"}, "json"},
+		{[]string{"--json=true"}, "json"},
+		{[]string{"--toon=1"}, "toon"},
+		{[]string{"--json=false"}, ""},
+		{[]string{"--json", "--json=false"}, ""},
+		{[]string{"exec", "--", "curl", "--json"}, ""},
+	} {
+		if got := argvFormat(tc.args); got != tc.want {
+			t.Errorf("argvFormat(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+
+	dir := t.TempDir()
+	code, stdout, _ := runTaker(t, dir, "snap", "app.py", "--json=true", "--bogus")
+	var rep Report
+	if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+		t.Fatalf("--json=true did not give JSON: %v\n%s", err, stdout)
+	}
+	if code != exitUsage || rep.Mode != "snap" || len(rep.Help) != 2 ||
+		rep.Help[0] != "run 'taker snap --help' for the valid flags" ||
+		!strings.Contains(rep.Help[1], "--lines") || !strings.Contains(rep.Help[1], "--git") {
+		t.Errorf("snap parse error = %d, mode %q, help %q", code, rep.Mode, rep.Help)
+	}
+	code, stdout, _ = runTaker(t, dir, "--json", "http", "-r", "r.http", "--bogus")
+	rep = Report{}
+	if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, stdout)
+	}
+	if code != exitUsage || rep.Mode != "http" || len(rep.Help) == 0 || !strings.Contains(rep.Help[0], "taker http --help") {
+		t.Errorf("flag before http = %d, mode %q, help %q", code, rep.Mode, rep.Help)
+	}
+}

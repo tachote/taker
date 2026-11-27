@@ -193,32 +193,20 @@ func main() {
 		// can act on, so the error goes through the same reporter as a bad
 		// input. The mode is guessed from argv: the command graph did not
 		// get built.
-		mode := "snap"
-		if len(os.Args) > 1 {
-			switch os.Args[1] {
-			case "http", "exec", "term":
-				mode = os.Args[1]
-			}
-		}
+		mode := parseErrorMode(parser.Model, os.Args[1:])
 		// Honor the format flag even though parsing died — a caller that
 		// asked for JSON gets JSON on every path. Only needle-flag values
 		// are secrets to mask; file paths and option values stay replayable.
-		format := ""
-		for _, a := range os.Args[1:] {
-			if a == "--json" {
-				format = "json"
-			} else if a == "--toon" {
-				format = "toon"
-			}
-		}
-		rep := newReporter(format, mode)
+		rep := newReporter(argvFormat(os.Args[1:]), mode)
 		rep.argv = os.Args
 		rep.secrets = argvNeedleValues(os.Args[1:])
-		hint := "taker --help"
-		if mode != "snap" {
-			hint = "taker " + mode + " --help"
+		// The mode's own help: `taker --help` lists only the commands. The
+		// flags also travel inline, so an agent can fix the call without a
+		// second round trip.
+		rep.helpf("run 'taker %s --help' for the valid flags", mode)
+		if flags := modeFlags(parser.Model, mode); len(flags) > 0 {
+			rep.helpf("taker %s flags: %s", mode, strings.Join(flags, " "))
 		}
-		rep.helpf("run '%s' for the valid flags", hint)
 		os.Exit(rep.fail(exitUsage, kindUsage, "%v", parseErr))
 	}
 
@@ -285,6 +273,93 @@ func main() {
 		code = runSnap(&cli.Snap, rep)
 	}
 	os.Exit(code)
+}
+
+// parseErrorMode picks the mode for a command line kong refused. It is the
+// first positional token, the way kong itself reads it: a command name there
+// selects that command, anything else is snap's file. Flags — and the value
+// after a flag that takes one — are skipped, so `taker --json http --bogus`
+// is http, and `taker app.py -t http --bogus` is still snap.
+func parseErrorMode(app *kong.Application, args []string) string {
+	takesValue := map[string]bool{}
+	commands := map[string]bool{}
+	for _, n := range app.Children {
+		commands[n.Name] = true
+		for _, f := range n.Flags {
+			if !f.IsBool() {
+				takesValue["--"+f.Name] = true
+				if f.Short != 0 {
+					takesValue["-"+string(f.Short)] = true
+				}
+			}
+		}
+	}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			// Everything after is positional; the next token decides.
+			if i+1 < len(args) && commands[args[i+1]] {
+				return args[i+1]
+			}
+			return "snap"
+		case strings.HasPrefix(a, "-") && a != "-":
+			if !strings.Contains(a, "=") && takesValue[a] {
+				i++
+			}
+		case commands[a]:
+			return a
+		default:
+			return "snap"
+		}
+	}
+	return "snap"
+}
+
+// argvFormat finds the report format a refused command line asked for. kong
+// reads --json=true and --json=false too, so this does: "--json=true" used to
+// be missed and the error came back as TOON.
+func argvFormat(args []string) string {
+	format := ""
+	for _, a := range args {
+		if a == "--" {
+			break
+		}
+		name, val, hasEq := strings.Cut(a, "=")
+		if name != "--json" && name != "--toon" {
+			continue
+		}
+		on := true
+		if hasEq {
+			b, err := strconv.ParseBool(val)
+			on = err == nil && b
+		}
+		switch {
+		case on:
+			format = strings.TrimPrefix(name, "--")
+		case format == strings.TrimPrefix(name, "--"):
+			format = "" // a later --json=false turns an earlier --json off
+		}
+	}
+	return format
+}
+
+// modeFlags lists the long flags a mode accepts, off kong's model, for the
+// inline hint on a parse error.
+func modeFlags(app *kong.Application, mode string) []string {
+	for _, n := range app.Children {
+		if n.Name != mode {
+			continue
+		}
+		var out []string
+		for _, f := range n.Flags {
+			if !f.Hidden {
+				out = append(out, "--"+f.Name)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 // newParser builds the command graph — factored out so a test can catch a
