@@ -259,3 +259,45 @@ func TestSuccessPathMasksNeedlesInCommand(t *testing.T) {
 		t.Errorf("mode=%q redactions=%d, want term with the secret boxed", rep.Mode, rep.Redactions)
 	}
 }
+
+// A comma is ordinary text in a --mark literal: function calls, CSV and JSON
+// values hold them. Kong's default list split turned -m "foo(a, b)" into two
+// needles, two boxes and no warning — a silent mis-mark.
+func TestMarkKeepsItsCommas(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"a.py":   "foo(a, b)\nbar\n",
+		"t.log":  "$ run\nfoo(a, b)\n",
+		"r.http": "POST / HTTP/1.1\r\nHost: x\r\n\r\nfoo(a, b)",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		args    []string
+		matches int
+	}{
+		{[]string{"a.py"}, 1},
+		{[]string{"term", "t.log"}, 1},
+		{[]string{"http", "-r", "r.http"}, 1},
+		// The prompt line echoes the command, so the literal is there twice.
+		{[]string{"exec", "--sh", "echo 'foo(a, b)'"}, 2},
+	} {
+		args := tc.args
+		t.Run(args[0], func(t *testing.T) {
+			full := append(slices.Clone(args), "-m", "foo(a, b)", "--dry-run", "--json")
+			code, stdout, stderr := runTaker(t, dir, full...)
+			if code != exitOK {
+				t.Fatalf("exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			var rep Report
+			if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+				t.Fatalf("not a json report: %v\n%s", err, stdout)
+			}
+			if len(rep.Marks) != 1 || rep.Marks[0].Needle != "foo(a, b)" || rep.Marks[0].Matches != tc.matches {
+				t.Errorf("marks = %+v, want one needle \"foo(a, b)\" with %d match(es)", rep.Marks, tc.matches)
+			}
+		})
+	}
+}

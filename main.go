@@ -33,7 +33,7 @@ type SnapCmd struct {
 	FirstLine  int      `name:"first-line" default:"1" help:"Line number of the input's first line. Set it when piping an excerpt, so the gutter and --highlight agree with the real file."`
 	Git        string   `name:"git" placeholder:"<rev>:<path>" help:"Render <path> at <rev> instead of the working-tree copy, e.g. HEAD:src/auth/login.py."`
 	Highlight  string   `short:"H" help:"Regions to highlight: '15', '13,15', '10-20', or '15:20-45' for columns."`
-	Mark       []string `short:"m" help:"Highlight every occurrence of this text. Repeatable."`
+	Mark       []string `short:"m" sep:"none" help:"Highlight every occurrence of this text; a comma is part of it. Repeat -m for more."`
 	MarkRe     []string `name:"mark-re" help:"Highlight every match of this regular expression. Repeatable."`
 	MaxMarks   int      `name:"max-marks" default:"0" help:"Keep at most N matches per --mark literal, earliest first (default: all)."`
 	Redact     []string `name:"redact" help:"Hide every occurrence of this text under a black box (secrets, tokens, PII). Repeatable; a comma inside a value splits it into two needles - escape it with a backslash-comma."`
@@ -63,7 +63,7 @@ type HTTPCmd struct {
 	File       string   `short:"f" help:"Combined capture file holding request then response (Burp 'Save item' format); the response starts at the first HTTP/ status line."`
 	ReqHL      string   `name:"hr" help:"Regions to highlight in request: '8-9' or '8:20-45' for columns."`
 	ResHL      string   `name:"hs" help:"Regions to highlight in response: '4' or '4:12-60' for columns."`
-	Mark       []string `short:"m" help:"Highlight every occurrence of this text in either panel. Repeatable."`
+	Mark       []string `short:"m" sep:"none" help:"Highlight every occurrence of this text in either panel; a comma is part of it. Repeat -m for more."`
 	MarkRe     []string `name:"mark-re" help:"Highlight every regex match in either panel. Repeatable."`
 	MaxMarks   int      `name:"max-marks" default:"0" help:"Keep at most N matches per --mark literal, earliest first (default: all)."`
 	Redact     []string `name:"redact" help:"Hide every occurrence of this text under a black box. Repeatable; a comma inside a value splits it into two needles - escape it with a backslash-comma."`
@@ -89,7 +89,7 @@ type ExecCmd struct {
 	Timeout    int      `name:"timeout" default:"15" help:"Seconds before the command is killed."`
 	Output     string   `short:"o" default:"output.png" help:"Output PNG file path."`
 	Label      string   `short:"L" help:"Caption strip stating what the image proves."`
-	Mark       []string `short:"m" help:"Highlight every occurrence of this text. Repeatable."`
+	Mark       []string `short:"m" sep:"none" help:"Highlight every occurrence of this text; a comma is part of it. Repeat -m for more."`
 	MarkRe     []string `name:"mark-re" help:"Highlight every regex match. Repeatable."`
 	MaxMarks   int      `name:"max-marks" default:"0" help:"Keep at most N matches per --mark literal."`
 	Redact     []string `name:"redact" help:"Hide every occurrence of this text under a black box. Repeatable; a comma inside a value splits it into two needles - escape it with a backslash-comma."`
@@ -111,7 +111,7 @@ type TermCmd struct {
 	File       string   `arg:"" required:"" help:"Transcript file to render."`
 	Output     string   `short:"o" default:"output.png" help:"Output PNG file path."`
 	Label      string   `short:"L" help:"Caption strip stating what the image proves."`
-	Mark       []string `short:"m" help:"Highlight every occurrence of this text. Repeatable."`
+	Mark       []string `short:"m" sep:"none" help:"Highlight every occurrence of this text; a comma is part of it. Repeat -m for more."`
 	MarkRe     []string `name:"mark-re" help:"Highlight every regex match. Repeatable."`
 	MaxMarks   int      `name:"max-marks" default:"0" help:"Keep at most N matches per --mark literal."`
 	Redact     []string `name:"redact" help:"Hide every occurrence of this text under a black box. Repeatable; a comma inside a value splits it into two needles - escape it with a backslash-comma."`

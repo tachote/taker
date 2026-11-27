@@ -91,7 +91,7 @@ taker [file] [flags]
 | `--git` | | — | Render `<rev>:<path>` out of the repository, e.g. `HEAD:src/auth/login.py` |
 | `--repo-dir` | | `.` | Repository directory for `--git` |
 | `--highlight` | `-H` | — | Regions to highlight in red: `15`, `13,15`, `10-20`, or `15:20-45` for columns |
-| `--mark` | `-m` | — | Highlight every occurrence of this text. Repeatable |
+| `--mark` | `-m` | — | Highlight every occurrence of this text; a comma is part of it. Repeat `-m` for more |
 | `--mark-re` | | — | Highlight every regex match. Repeatable |
 | `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal, earliest first |
 | `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable |
@@ -202,7 +202,7 @@ Renders a side-by-side Request / Response pane built to look like Burp Suite's m
 | `-f` | One file holding request **and** response (Burp "Save item"); `-r`/`-s` take precedence |
 | `--hr` | Regions to highlight in the request: `8-9`, or `8:20-45` for columns |
 | `--hs` | Regions to highlight in the response: `4`, or `4:12-60` for columns |
-| `--mark` / `-m` | Highlight every occurrence of this text in either panel. Repeatable |
+| `--mark` / `-m` | Highlight every occurrence of this text in either panel; a comma is part of it. Repeat `-m` for more |
 | `--mark-re` | Highlight every regex match in either panel. Repeatable |
 | `--max-marks` | Keep at most N matches per `--mark` literal, earliest first |
 | `--redact` | Hide every occurrence of this text under a black box. Repeatable |
