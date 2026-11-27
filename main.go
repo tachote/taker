@@ -1088,33 +1088,69 @@ func unbalancedRE(p string) bool {
 // promptRGB is the classic shell-prompt green on the "$ " prefix.
 const promptR, promptG, promptB = 0x3f, 0xb9, 0x50
 
-// recolorPrompt paints the "$ " prefix on the transcript's first line in the
-// prompt colour. The text lexer gives the whole line one colour; the prompt
-// needs its own, like a real terminal draws it.
-func recolorPrompt(lines []highlight.LineTokens) {
-	const plen = 2 // len("$ ")
-	if len(lines) == 0 || lines[0].IsGap {
-		return
-	}
-	var out []highlight.Token
-	left := plen
-	for _, t := range lines[0].Tokens {
-		if left == 0 {
-			out = append(out, t)
+// promptPrefix is how a transcript marks a command line: exec draws it, and a
+// term transcript that follows the same convention gets the same colours.
+const promptPrefix = "$ "
+
+// colorPrompts paints each command line of a transcript the way a terminal
+// with shell highlighting draws it: the "$ " prefix in prompt green and the
+// command through chroma's bash lexer, so commands, flags, strings and
+// operators stand apart from the output under them. firstOnly limits it to
+// line one (exec, whose only command line is the one it ran); otherwise every
+// line that starts with the prefix counts (term).
+//
+// Only colours change: a line whose highlighted text would differ from the
+// drawn text by even one rune keeps the plain colours, because marks and
+// redaction boxes are placed on that text.
+func colorPrompts(lines []highlight.LineTokens, theme *render.Theme, firstOnly bool) {
+	for i := range lines {
+		if firstOnly && i > 0 {
+			break
+		}
+		if lines[i].IsGap {
 			continue
 		}
+		var b strings.Builder
+		for _, t := range lines[i].Tokens {
+			b.WriteString(t.Text)
+		}
+		text := b.String()
+		if !strings.HasPrefix(text, promptPrefix) {
+			continue
+		}
+		out := []highlight.Token{{Text: promptPrefix, R: promptR, G: promptG, B: promptB}}
+		if cmdText := text[len(promptPrefix):]; cmdText != "" {
+			toks, ok := shellTokens(cmdText, theme)
+			if !ok {
+				toks = plainAfterPrefix(lines[i].Tokens)
+			}
+			out = append(out, toks...)
+		}
+		lines[i].Tokens = out
+	}
+}
+
+// shellTokens highlights one command line as a shell would (see
+// highlight.ShellLine). ok is false when it could not keep the text intact.
+func shellTokens(cmdText string, theme *render.Theme) ([]highlight.Token, bool) {
+	return highlight.ShellLine(cmdText, theme.Chroma)
+}
+
+// plainAfterPrefix drops the prefix's runes from a line's own tokens, keeping
+// the text lexer's colour for the rest.
+func plainAfterPrefix(tokens []highlight.Token) []highlight.Token {
+	left := len([]rune(promptPrefix))
+	var out []highlight.Token
+	for _, t := range tokens {
 		runes := []rune(t.Text)
-		if len(runes) <= left {
-			out = append(out, highlight.Token{Text: t.Text, R: promptR, G: promptG, B: promptB})
+		if left >= len(runes) {
 			left -= len(runes)
 			continue
 		}
-		out = append(out,
-			highlight.Token{Text: string(runes[:left]), R: promptR, G: promptG, B: promptB},
-			highlight.Token{Text: string(runes[left:]), R: t.R, G: t.G, B: t.B})
+		out = append(out, highlight.Token{Text: string(runes[left:]), R: t.R, G: t.G, B: t.B})
 		left = 0
 	}
-	lines[0].Tokens = out
+	return out
 }
 
 // termMarks finds the -m literals and --mark-re matches in a transcript and
@@ -1991,7 +2027,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitRefused, kindRefused, "tokenize transcript: %v", err)
 	}
-	recolorPrompt(lines)
+	colorPrompts(lines, theme, true)
 
 	markRe, err := compileRegex("--mark-re", cmd.MarkRe)
 	if err != nil {
@@ -2083,6 +2119,7 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitRefused, kindRefused, "tokenize transcript: %v", err)
 	}
+	colorPrompts(lines, theme, false)
 
 	markRe, err := compileRegex("--mark-re", cmd.MarkRe)
 	if err != nil {

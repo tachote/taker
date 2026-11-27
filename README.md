@@ -298,7 +298,7 @@ taker exec [flags] --sh '<pipeline>'
 taker term <transcript-file> [flags]
 ```
 
-The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. Tabs expand to 8-column stops, as in a terminal, so a `ps` or `ls -l` table keeps its columns.
+The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. Tabs expand to 8-column stops, as in a terminal, so a `ps` or `ls -l` table keeps its columns. Command lines are drawn with shell highlighting: the `$ ` in prompt green, then the command name, flags, strings, variables, operators and redirections in the theme's colours (the line `taker exec` ran, and every transcript line that starts with `$ ` in `taker term`). Only colours change; the text, marks and redaction boxes stay where they were.
 
 **Put taker's flags before `--`.** Everything after `--` belongs to the command: `taker exec -- id -o rce.png` runs `id -o rce.png` and writes `output.png` (taker warns). Without `--`, one of exec's own flags inside the command (`taker exec id -o x.png`) is refused (exit 2) instead of guessed at, and an unknown flag in front of the command (`taker exec --bogus`) is a usage error that names it. The command's own flags (`head -n 2`, `grep -v`) are never taken for taker's.
 
