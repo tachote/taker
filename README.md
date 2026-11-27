@@ -22,15 +22,19 @@ Download the latest release for your platform from the [releases page](https://g
 ASSET=taker_darwin_arm64.tar.gz
 BASE=https://github.com/tachote/taker/releases/latest/download
 
-curl -LO "$BASE/$ASSET"
-curl -LO "$BASE/checksums.txt"
-shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-missing -c checksums.txt
-
-tar xzf "$ASSET" taker
-sudo mv taker /usr/local/bin/
+# Each step runs only if the previous one succeeded: a failed download or a
+# checksum mismatch stops the install before anything is extracted.
+# Linux: use `sha256sum --ignore-missing -c checksums.txt` instead of shasum.
+curl -fLO "$BASE/$ASSET" &&
+  curl -fLO "$BASE/checksums.txt" &&
+  shasum -a 256 --ignore-missing -c checksums.txt &&
+  tar xzf "$ASSET" taker &&
+  sudo mv taker /usr/local/bin/
 ```
 
-On Windows, check `taker_windows_amd64.zip` against `checksums.txt` with `Get-FileHash -Algorithm SHA256`, then extract `taker.exe`.
+If the check prints `FAILED`, do not install: delete the archive and download it again.
+
+On Windows, compare the `Get-FileHash -Algorithm SHA256 taker_windows_amd64.zip` output with the `taker_windows_amd64.zip` line in `checksums.txt`. Extract `taker.exe` only if the two hashes are identical; if they differ, delete the zip and do not run anything from it.
 
 ### go install
 
