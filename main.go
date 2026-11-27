@@ -1727,12 +1727,19 @@ func runChild(argv []string, timeout, grace time.Duration) childRun {
 			}
 			readDone = nil // EOF: the command is still running, keep waiting
 		case <-deadline.C:
-			killGroup(child)
-			<-waitc
 			exited = true
 			// The command can exit on its own in the same instant; only
-			// a command our kill ended is a timeout.
-			run.timedOut = !child.ProcessState.Exited()
+			// a command our kill ended is a timeout. Asked of the wait,
+			// not of the status: a Windows status always says "exited",
+			// a killed process included.
+			select {
+			case <-waitc:
+				continue
+			default:
+			}
+			killed := killGroup(child)
+			<-waitc
+			run.timedOut = killedByDeadline(child.ProcessState, killed)
 		}
 	}
 	run.state = child.ProcessState

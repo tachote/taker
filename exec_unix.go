@@ -19,8 +19,17 @@ func newChild(argv []string) *exec.Cmd {
 }
 
 // killGroup SIGKILLs every process in the child's group, not just the child.
-func killGroup(c *exec.Cmd) {
-	syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+// It reports whether the signal was sent.
+func killGroup(c *exec.Cmd) bool {
+	return syscall.Kill(-c.Process.Pid, syscall.SIGKILL) == nil
+}
+
+// killedByDeadline says whether the deadline's kill ended the command. The
+// group can still be signalled after the command exited — a zombie, or a
+// process it left behind — so the wait status decides: a command that exited
+// on its own in the same instant keeps its exit status.
+func killedByDeadline(ps *os.ProcessState, _ bool) bool {
+	return !ps.Exited()
 }
 
 // signalNames are the signals a command under test is likely to die of,

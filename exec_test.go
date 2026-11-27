@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -269,6 +270,41 @@ func TestExecTimeoutKills(t *testing.T) {
 	run = runChild([]string{"sh", "-c", "exit 4"}, 5*time.Second, 200*time.Millisecond)
 	if run.timedOut || run.held || run.state == nil || run.state.ExitCode() != 4 {
 		t.Errorf("run = %+v, want exit 4", run)
+	}
+}
+
+// The deadline is a timeout on every OS, Windows included: there a killed
+// process's status says "exited 1", and reading the timeout off the status
+// labelled a killed long-runner "exit 1". The command is this test binary,
+// so the test needs no shell and runs on Windows CI too.
+func TestExecTimeoutAnyOS(t *testing.T) {
+	self := []string{os.Args[0], "-test.run=^TestExecHelperProcess$"}
+	t.Setenv("TAKER_EXEC_HELPER", "sleep")
+	start := time.Now()
+	run := runChild(self, 2*time.Second, 200*time.Millisecond)
+	if run.startErr != nil || !run.timedOut {
+		t.Errorf("run = %+v, want a timeout", run)
+	}
+	if took := time.Since(start); took > 15*time.Second {
+		t.Errorf("took %s for a 2s deadline", took)
+	}
+	t.Setenv("TAKER_EXEC_HELPER", "exit4")
+	run = runChild(self, 30*time.Second, 200*time.Millisecond)
+	if run.timedOut || run.state == nil || run.state.ExitCode() != 4 {
+		t.Errorf("run = %+v, want exit 4 and no timeout", run)
+	}
+}
+
+// TestExecHelperProcess is the command TestExecTimeoutAnyOS runs; without
+// TAKER_EXEC_HELPER it does nothing.
+func TestExecHelperProcess(t *testing.T) {
+	switch os.Getenv("TAKER_EXEC_HELPER") {
+	case "sleep":
+		fmt.Println("started")
+		time.Sleep(60 * time.Second)
+		os.Exit(0)
+	case "exit4":
+		os.Exit(4)
 	}
 }
 
