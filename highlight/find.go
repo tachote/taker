@@ -119,8 +119,8 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 }
 
 // FindRegexMarks is FindMarks for compiled patterns. Match offsets are byte
-// offsets while spans count characters, so each match is re-measured — a span
-// that counted bytes would drift right on any line holding non-ASCII text.
+// offsets while spans count characters, so each match is measured in runes — a
+// span that counted bytes would drift right on any line holding non-ASCII text.
 // Zero-width matches are skipped: an empty box points at nothing.
 func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit int) ([]Marks, []MarkStats) {
 	out := make([]Marks, len(messages))
@@ -140,12 +140,20 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 					continue
 				}
 				text := lt.Text()
+				// Matches come in order and never overlap, so the column is
+				// carried forward from the previous match instead of being
+				// recounted from column 1: that recount made a one-line JSON
+				// body quadratic in its length.
+				prev, col := 0, 0
 				for _, loc := range re.FindAllStringIndex(text, -1) {
 					if loc[0] == loc[1] {
 						continue
 					}
-					start := utf8.RuneCountInString(text[:loc[0]]) + 1
-					end := utf8.RuneCountInString(text[:loc[1]])
+					col += utf8.RuneCountInString(text[prev:loc[0]])
+					start := col + 1
+					col += utf8.RuneCountInString(text[loc[0]:loc[1]])
+					end := col
+					prev = loc[1]
 					hits = append(hits, ScopedSpan{Message: mi, Line: lt.LineNum, Span: Span{Start: start, End: end}})
 					lines[[2]int{mi, lt.LineNum}] = true
 				}

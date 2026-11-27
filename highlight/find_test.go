@@ -1,6 +1,8 @@
 package highlight
 
 import (
+	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -170,5 +172,34 @@ func TestKeepSpansCountsShortRegexMatches(t *testing.T) {
 	}
 	if kept.Has(1) || !kept.Has(2) {
 		t.Errorf("kept lines = %v, want only line 2", kept.Lines())
+	}
+}
+
+// A JSON response body is usually one line. Measuring every match from column
+// 1 made this quadratic in the line length; a minified body with a pattern
+// that matches often took seconds.
+func BenchmarkFindRegexMarksLongLine(b *testing.B) {
+	var sb strings.Builder
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&sb, `{"id":%d,"n":"é"},`, i)
+	}
+	lines := linesOf(sb.String())
+	re := regexp.MustCompile(`"id":[0-9]+`)
+	b.ReportAllocs()
+	for b.Loop() {
+		FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 3)
+	}
+}
+
+// Running offsets have to land on the same columns as measuring each match
+// from the start: non-ASCII text before and between matches is where a
+// byte/rune mix-up would show.
+func TestFindRegexMarksRunningColumns(t *testing.T) {
+	lines := linesOf("ñ=ab → ab ✓ab")
+	re := regexp.MustCompile("ab")
+	got, _ := FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 0)
+	want := []Span{{Start: 3, End: 4}, {Start: 8, End: 9}, {Start: 12, End: 13}}
+	if !reflect.DeepEqual(got[0][1], want) {
+		t.Errorf("spans = %v, want %v", got[0][1], want)
 	}
 }
