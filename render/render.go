@@ -148,7 +148,7 @@ type Config struct {
 
 	httpTabs []burpTab // view strip for an HTTP panel
 
-	noWarn bool // set on a re-render, so warnings are not printed twice
+	noWarn bool // tests silence warnings with it; nothing in the CLI sets it
 }
 
 // visualLine is one rendered row — may be a logical line, a continuation row
@@ -249,9 +249,9 @@ type metrics struct {
 }
 
 // loadMetrics is the parse; metricsFor is the cache. The three faces come out
-// of embedded TTFs on every call, and one HTTP render asks for them up to five
-// times (two panels, two height re-renders, the caption). The metrics are
-// content-independent, so one parse serves every render in the process.
+// of embedded TTFs on every call, and one HTTP render asks for them three
+// times (each panel, then the caption). The metrics are content-independent,
+// so one parse serves every render in the process.
 var metricsFor = sync.OnceValues(loadMetrics)
 
 func loadMetrics() (*metrics, error) {
@@ -471,12 +471,15 @@ func MaxWrapCols(httpMode bool) int {
 		return defaultWrapCols
 	}
 	g := geometryFor(httpMode)
-	gutterW := g.gutterL + m.charWidth + g.gutterR // one digit
-	cols := (maxImageWidth - (gutterW + 1 + g.codeGap) - g.canvasPadR) / m.charWidth
-	if cols < minContentChars {
-		return minContentChars
-	}
-	return cols
+	return fitColumns(g, g.gutterL+m.charWidth+g.gutterR, m.charWidth) // one digit
+}
+
+// fitColumns is how many character cells fit between the gutter and the
+// canvas cap. Render and MaxWrapCols must agree on it exactly: the CLI checks
+// --wrap-width against MaxWrapCols, and Render clamps to its own copy, so two
+// formulas that drift apart would report one bound and enforce another.
+func fitColumns(g geom, gutterW, charW int) int {
+	return max(minContentChars, (maxImageWidth-(gutterW+1+g.codeGap)-g.canvasPadR)/charW)
 }
 
 // Render produces the final PNG image.
@@ -499,10 +502,7 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	// Columns that still fit inside the canvas cap. Anything past this would be
 	// cropped off the right edge, which is exactly the silent evidence loss the
 	// auto-wrap below exists to prevent.
-	fitCols := (maxImageWidth - (gutterW + 1 + g.codeGap) - g.canvasPadR) / m.charWidth
-	if fitCols < minContentChars {
-		fitCols = minContentChars
-	}
+	fitCols := fitColumns(g, gutterW, m.charWidth)
 
 	wrapCols := 0
 	if cfg.Wrap {
@@ -808,10 +808,10 @@ func drawTabBar(img *image.NRGBA, l *layout, title string, ui UIColors) {
 	// A title wider than the canvas would run off the edge mid-word, which
 	// looks like a broken render rather than a long path.
 	closeW := textWidth(l.iconFace, string(gClose))
-	fixed := tabPad + l.iconW + tabIconGap + tabCloseGap + closeW + tabPad
-	title = ellipsizeLeft(l.face, title, l.totalWidth-fixed)
+	chromeW := tabPad + l.iconW + tabIconGap + tabCloseGap + closeW + tabPad
+	title = ellipsizeLeft(l.face, title, l.totalWidth-chromeW)
 
-	tabW := fixed + textWidth(l.face, title)
+	tabW := chromeW + textWidth(l.face, title)
 	if tabW > l.totalWidth {
 		tabW = l.totalWidth
 	}
@@ -908,8 +908,8 @@ func withWindowBar(panel *image.NRGBA, title string, ui UIColors, m *metrics) *i
 		drawCircle(out, windowDotInset+i*(windowDotR*2+windowDotGap)+windowDotR, cy, windowDotR, d)
 	}
 
-	if max := w - 2*windowTitlePad; textWidth(m.uiFace, title) > max {
-		title = ellipsizeLeft(m.uiFace, title, max)
+	if maxW := w - 2*windowTitlePad; textWidth(m.uiFace, title) > maxW {
+		title = ellipsizeLeft(m.uiFace, title, maxW)
 	}
 	tx := max(0, (w-textWidth(m.uiFace, title))/2)
 	drawString(out, m.uiFace, title, tx, m.baselineUI(0, windowBarH), ui.LineNumFg)
