@@ -6,8 +6,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The trap list is exec's own flags, read off kong: -n, --lines, -v and
@@ -189,6 +191,133 @@ func TestExecRedactHoldingAQuote(t *testing.T) {
 		t.Errorf("the refused value leaked:\n%s\n%s", stdout, stderr)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "p.png")); err == nil {
+		t.Error("a refused run wrote an image")
+	}
+}
+
+func execCmd(c ExecCmd) *ExecCmd {
+	c.Theme, c.Chrome, c.WrapWidth, c.JSON = "vscode-dark", "window", 80, true
+	if c.Timeout == 0 {
+		c.Timeout = 10
+	}
+	return &c
+}
+
+func needSh(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("needs a POSIX sh and signals")
+	}
+}
+
+// The status comes from how the wait ended. A command that exits 0 while a
+// background process it started still holds the pipe exits 0: it used to
+// keep taker until the deadline and be labelled "killed after Ns".
+func TestExecStatusComesFromTheWait(t *testing.T) {
+	needSh(t)
+	dir := t.TempDir()
+	start := time.Now()
+	code, rep, stderr := runJSON(t, func(r *reporter) int {
+		return runExec(execCmd(ExecCmd{
+			Shell: "sleep 30 & echo hi", Timeout: 20, Output: filepath.Join(dir, "bg.png"),
+		}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("exec = %d\n%s", code, stderr)
+	}
+	if took := time.Since(start); took > execPipeGrace+5*time.Second {
+		t.Errorf("took %s: the background sleeper held the run", took)
+	}
+	if rep.Exec == nil || rep.Exec.TimedOut || rep.Exec.Exit == nil || *rep.Exec.Exit != 0 {
+		t.Errorf("exec = %+v, want exit 0 and no timeout", rep.Exec)
+	}
+	if !hasWarning(rep, "a background process still held the output") {
+		t.Errorf("no held-pipe warning in %q", rep.Warnings)
+	}
+}
+
+// A signal is not an exit code: exit is null and the signal is named,
+// where Go's -1 used to land in the footnote and the report.
+func TestExecNamesTheSignal(t *testing.T) {
+	needSh(t)
+	dir := t.TempDir()
+	code, rep, stderr := runJSON(t, func(r *reporter) int {
+		return runExec(execCmd(ExecCmd{Shell: "echo before; kill -9 $$", Output: filepath.Join(dir, "s.png")}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("exec = %d\n%s", code, stderr)
+	}
+	if rep.Exec == nil || rep.Exec.Exit != nil || rep.Exec.Signal != "SIGKILL" || rep.Exec.TimedOut {
+		t.Errorf("exec = %+v, want exit null, signal SIGKILL, no timeout", rep.Exec)
+	}
+}
+
+// The deadline kills a command that is still running, and only that is a
+// timeout.
+func TestExecTimeoutKills(t *testing.T) {
+	needSh(t)
+	start := time.Now()
+	run := runChild([]string{"sleep", "30"}, 300*time.Millisecond, 200*time.Millisecond)
+	if run.startErr != nil || !run.timedOut || run.signal != "SIGKILL" {
+		t.Errorf("run = %+v, want a SIGKILL timeout", run)
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("took %s for a 300ms deadline", took)
+	}
+	// A command that is done well before the deadline is not timed out.
+	run = runChild([]string{"sh", "-c", "exit 4"}, 5*time.Second, 200*time.Millisecond)
+	if run.timedOut || run.held || run.state == nil || run.state.ExitCode() != 4 {
+		t.Errorf("run = %+v, want exit 4", run)
+	}
+}
+
+// --timeout 0 killed the command before it printed and drew the empty frame
+// as "killed after 0s".
+func TestExecTimeoutMustBePositive(t *testing.T) {
+	for _, n := range []int{0, -1} {
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			c := execCmd(ExecCmd{Args: []string{"echo", "hi"}, Output: filepath.Join(t.TempDir(), "o.png")})
+			c.Timeout = n
+			return runExec(c, r)
+		})
+		if code != exitUsage || rep.Error == nil || !strings.Contains(rep.Error.Message, "--timeout must be at least 1") {
+			t.Errorf("--timeout %d = %d %+v, want a usage error", n, code, rep.Error)
+		}
+	}
+}
+
+// Output past the cap cannot render, so exec stops reading, kills the
+// command and refuses — at once, not after gigabytes and minutes.
+func TestExecOutputCap(t *testing.T) {
+	needSh(t)
+	for _, tc := range []struct {
+		argv []string
+		over string
+	}{
+		{[]string{"yes"}, "10000 lines"},
+		{[]string{"sh", "-c", "while :; do printf '%01024d' 0; done"}, "4 MiB"},
+	} {
+		start := time.Now()
+		run := runChild(tc.argv, 20*time.Second, 200*time.Millisecond)
+		if run.overflow != tc.over || run.timedOut {
+			t.Errorf("%v: overflow %q timedOut %v, want %q", tc.argv, run.overflow, run.timedOut, tc.over)
+		}
+		if took := time.Since(start); took > 10*time.Second {
+			t.Errorf("%v took %s", tc.argv, took)
+		}
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "y.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runExec(execCmd(ExecCmd{Args: []string{"yes"}, Output: out}), r)
+	})
+	if code != exitRefused || rep.Error == nil || !strings.Contains(rep.Error.Message, "passed 10000 lines") {
+		t.Errorf("exec yes = %d %+v, want a refusal naming the cap", code, rep.Error)
+	}
+	if len(rep.Help) == 0 || !strings.Contains(rep.Help[0], "yes | head -n 200") {
+		t.Errorf("help = %q, want the head hint", rep.Help)
+	}
+	if _, err := os.Stat(out); err == nil {
 		t.Error("a refused run wrote an image")
 	}
 }

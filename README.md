@@ -292,12 +292,12 @@ taker exec --sh '<pipeline>' [flags]
 taker term <transcript-file> [flags]
 ```
 
-The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. The exit status lands in the footnote (`exit 0`, `exit 1`, `timed out after Ns`), so a non-zero result is documented, not hidden.
+The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. The exit status lands in the footnote (`exit 0`, `exit 1`, `killed by SIGSEGV`, `killed after Ns` when `--timeout` stopped it), so a non-zero result is documented, not hidden. The status is the command's own: a background process it leaves holding the output is given 2 more seconds, then killed with the command's process group, and the footnote adds `output cut 2s later`. Output past 10000 lines or 4 MiB cannot render under the 32000px cap, so `taker exec` kills the command and refuses (exit 4) instead of drawing a cut transcript; pipe it through `head`.
 
 | Flag | Description |
 |------|-------------|
 | `--sh` | Run the string through `sh -c` instead of exec'ing argv (mutually exclusive with a positional command) |
-| `--timeout` | Kill the command after this many seconds (default: none) |
+| `--timeout` | Kill the command after this many seconds (default: 15, minimum 1) |
 | `--lines` / `-n` | Lines of the transcript to include |
 | `--wrap-width` | Terminal width in columns (default: 80) |
 | `-m` / `--mark` / `--mark-re` | Highlight literals / regex matches in the output |
@@ -474,8 +474,9 @@ confirm guesses at a short secret. So `sha256sum <file>` equals the reported
 sum only for a plain file with nothing redacted; to check any other run,
 apply the same two steps first. `redactions` counts
 the black boxes the footnote declares. For `taker exec`, `exec` carries the
-child command's outcome (`exit`, `timed_out`) — taker's own `exit` says the
-evidence was produced, `exec.exit` says what the command answered. `warnings`
+child command's outcome (`exit`, `timed_out`, and `signal` — `SIGKILL`,
+`SIGSEGV` — with `exit` null when a signal ended it) — taker's own `exit` says
+the evidence was produced, `exec.exit` says what the command answered. `warnings`
 holds the same caveats the
 terminal shows — a mark that landed outside the view, a redaction that matched
 nothing, a trim that cut the request line — so they survive a consumer that never

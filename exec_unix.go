@@ -3,6 +3,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -19,4 +21,27 @@ func newChild(argv []string) *exec.Cmd {
 // killGroup SIGKILLs every process in the child's group, not just the child.
 func killGroup(c *exec.Cmd) {
 	syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
+}
+
+// signalNames are the signals a command under test is likely to die of,
+// by the name a reader of the evidence knows them by.
+var signalNames = map[syscall.Signal]string{
+	syscall.SIGHUP: "SIGHUP", syscall.SIGINT: "SIGINT", syscall.SIGQUIT: "SIGQUIT",
+	syscall.SIGILL: "SIGILL", syscall.SIGTRAP: "SIGTRAP", syscall.SIGABRT: "SIGABRT",
+	syscall.SIGBUS: "SIGBUS", syscall.SIGFPE: "SIGFPE", syscall.SIGKILL: "SIGKILL",
+	syscall.SIGUSR1: "SIGUSR1", syscall.SIGSEGV: "SIGSEGV", syscall.SIGUSR2: "SIGUSR2",
+	syscall.SIGPIPE: "SIGPIPE", syscall.SIGALRM: "SIGALRM", syscall.SIGTERM: "SIGTERM",
+	syscall.SIGXCPU: "SIGXCPU", syscall.SIGXFSZ: "SIGXFSZ", syscall.SIGSYS: "SIGSYS",
+}
+
+// signalName is the signal that ended the process, or "" when it exited.
+func signalName(ps *os.ProcessState) string {
+	ws, ok := ps.Sys().(syscall.WaitStatus)
+	if !ok || !ws.Signaled() {
+		return ""
+	}
+	if name, ok := signalNames[ws.Signal()]; ok {
+		return name
+	}
+	return fmt.Sprintf("signal %d", int(ws.Signal()))
 }

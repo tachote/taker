@@ -3,7 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"image"
@@ -87,7 +86,7 @@ type HTTPCmd struct {
 type ExecCmd struct {
 	Args       []string `arg:"" name:"command" passthrough:"" optional:"" help:"Command to run. Put it after -- so its flags stay its own."`
 	Shell      string   `name:"sh" help:"Run this command line through sh -c (for pipes and quoting)."`
-	Timeout    int      `name:"timeout" default:"15" help:"Seconds before the command is killed."`
+	Timeout    int      `name:"timeout" default:"15" help:"Seconds before the command is killed (minimum 1)."`
 	Output     string   `short:"o" default:"output.png" help:"Output PNG file path."`
 	Label      string   `short:"L" help:"Caption strip stating what the image proves."`
 	Mark       []string `short:"m" sep:"none" help:"Highlight every occurrence of this text; a comma is part of it. Repeat -m for more."`
@@ -1327,6 +1326,169 @@ func takerFlagIn(argv []string) string {
 	return ""
 }
 
+// Limits on what exec reads from the command. Nothing past about 650 rows
+// renders under the 32000px cap, so these sit far above any transcript that
+// can render — ANSI colour and multi-byte text included — and far below the
+// gigabytes an unbounded `yes` reached before the height check refused it.
+const (
+	execMaxBytes = 4 << 20
+	execMaxLines = 10000
+)
+
+// execPipeGrace is how long exec keeps reading after the command exits. A
+// background process it started can hold the output pipe open for good;
+// waiting for it kept taker until the deadline and then labelled a command
+// that had exited 0 as killed.
+const execPipeGrace = 2 * time.Second
+
+// childRun is how one exec run ended.
+type childRun struct {
+	out      []byte
+	startErr error
+	state    *os.ProcessState
+	signal   string // the signal that ended the command, "" when it exited
+	timedOut bool   // the deadline killed the command itself
+	held     bool   // something still held the output past the grace; it was killed
+	overflow string // the limit the output passed, "" when it fit
+}
+
+// outputCap collects the command's output up to the exec limits. It is
+// sealed once the run is over, so a writer that outlives the run — a
+// detached process on a platform where closing the pipe does not stop the
+// read — cannot change the bytes after they were taken.
+type outputCap struct {
+	mu     sync.Mutex
+	buf    []byte
+	lines  int
+	over   string
+	sealed bool
+}
+
+func (c *outputCap) add(p []byte) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sealed {
+		return false
+	}
+	c.lines += bytes.Count(p, []byte{'\n'})
+	switch {
+	case len(c.buf)+len(p) > execMaxBytes:
+		c.over = fmt.Sprintf("%d MiB", execMaxBytes>>20)
+	case c.lines > execMaxLines:
+		c.over = fmt.Sprintf("%d lines", execMaxLines)
+	default:
+		c.buf = append(c.buf, p...)
+		return true
+	}
+	return false
+}
+
+// limit is the limit the output passed, "" while it fits.
+func (c *outputCap) limit() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.over
+}
+
+func (c *outputCap) seal() ([]byte, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sealed = true
+	return c.buf, c.over
+}
+
+// runChild runs argv with stdout and stderr on one pipe that exec reads
+// itself, so it knows which of three things ended the run: the command
+// exiting, the deadline, or the output cap. The whole process group is
+// killed on the deadline and on the cap: a child that forks a sleeper
+// leaves the pipe open, and a lone kill would leave us reading it until
+// the grandchild exits on its own.
+func runChild(argv []string, timeout, grace time.Duration) childRun {
+	var run childRun
+	child := newChild(argv)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		run.startErr = err
+		return run
+	}
+	defer pr.Close()
+	child.Stdout, child.Stderr = pw, pw
+	err = child.Start()
+	pw.Close() // the child holds its own copy; ours would keep the pipe open
+	if err != nil {
+		run.startErr = err
+		return run
+	}
+
+	capture := &outputCap{}
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		b := make([]byte, 32<<10)
+		for {
+			n, err := pr.Read(b)
+			if n > 0 && !capture.add(b[:n]) {
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	waitc := make(chan struct{})
+	go func() {
+		child.Wait()
+		close(waitc)
+	}()
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+
+	// Phase one: until the command itself is gone. The reader can finish
+	// first — the command closed its output, or passed the cap.
+	exited := false
+	for !exited {
+		select {
+		case <-waitc:
+			exited = true
+		case <-readDone:
+			if over := capture.limit(); over != "" {
+				killGroup(child)
+				<-waitc
+				run.overflow = over
+				return run
+			}
+			readDone = nil // EOF: the command is still running, keep waiting
+		case <-deadline.C:
+			killGroup(child)
+			<-waitc
+			exited = true
+			// The command can exit on its own in the same instant; only
+			// a command our kill ended is a timeout.
+			run.timedOut = !child.ProcessState.Exited()
+		}
+	}
+	run.state = child.ProcessState
+	run.signal = signalName(run.state)
+
+	// Phase two: the output the command wrote before it exited is still in
+	// the pipe. Read it to the end, but not past the grace: a process that
+	// holds the pipe after the command is gone is not part of its answer.
+	if readDone != nil {
+		select {
+		case <-readDone:
+		case <-time.After(grace):
+			run.held = true
+		}
+	}
+	run.out, run.overflow = capture.seal()
+	// What is left of the group goes with the run. A process that left the
+	// group (setsid) is out of reach; the pipe closes under it when we return.
+	if run.held || run.overflow != "" {
+		killGroup(child)
+	}
+	return run
+}
+
 // ownArgs is the part of argv that taker parsed itself. Kong hands exec
 // everything from the first positional on, verbatim, as the command — so a
 // tail of argv equal to it belongs to the command, and `taker exec id -o x -m`
@@ -1348,11 +1510,17 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 		return code
 	}
 	for _, c := range [][2]any{
-		{"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks}, {"--timeout", cmd.Timeout},
+		{"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks},
 	} {
 		if code := nonneg(rep, c[0].(string), c[1].(int)); code != 0 {
 			return code
 		}
+	}
+	// Zero used to kill the command before it printed anything and render
+	// the empty frame as "killed after 0s" — an image of nothing that looks
+	// like evidence of something.
+	if cmd.Timeout < 1 {
+		return rep.fail(exitUsage, kindUsage, "--timeout must be at least 1 second, got %d", cmd.Timeout)
 	}
 	theme, err := resolveTheme(cmd.Theme)
 	if err != nil {
@@ -1433,51 +1601,46 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	}
 	rep.note("$ %s", provStr)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cmd.Timeout)*time.Second)
-	defer cancel()
-	// Kill the whole process group on the deadline: a child that forks a
-	// sleeper leaves the pipe open, and CommandContext's lone kill would
-	// leave us blocked reading it until the grandchild exits on its own.
-	child := newChild(argv)
-	var buf bytes.Buffer
-	child.Stdout, child.Stderr = &buf, &buf
-	var runErr error
-	if err := child.Start(); err != nil {
-		runErr = err
-	} else {
-		waitc := make(chan error, 1)
-		go func() { waitc <- child.Wait() }()
-		select {
-		case runErr = <-waitc:
-		case <-ctx.Done():
-			killGroup(child)
-			<-waitc
-		}
+	run := runChild(argv, time.Duration(cmd.Timeout)*time.Second, execPipeGrace)
+	if run.startErr != nil {
+		rep.helpf("check that the command exists on PATH and its argv is valid")
+		return rep.fail(exitInput, kindInput, "run %q: %v", provStr, run.startErr)
 	}
-	out := buf.Bytes()
+	// Past the cap nothing can render, and a cut transcript would be less
+	// faithful than none: refuse, and name the way to keep what matters.
+	if run.overflow != "" {
+		rep.helpf("taker exec --sh %s", quoteWord(provStr+" | head -n 200", true))
+		return rep.fail(exitRefused, kindRefused,
+			"the output passed %s — it cannot render under 32000px; the command was killed", run.overflow)
+	}
 
 	// The exit status is part of the evidence: a failed exploit looks different
 	// from a successful one, and a killed long-runner is not an empty result.
+	// It comes from how the wait ended, not from the clock: a command that
+	// exited on its own keeps its own status even when the deadline passed
+	// while something it left behind still held the output.
 	var status string
-	rep.rep.Exec = &ExecReport{}
+	rep.rep.Exec = &ExecReport{Signal: run.signal}
 	switch {
-	case ctx.Err() == context.DeadlineExceeded:
+	case run.timedOut:
 		status = fmt.Sprintf("killed after %ds", cmd.Timeout)
 		rep.rep.Exec.TimedOut = true
-	case runErr != nil:
-		var exitErr *exec.ExitError
-		if !errors.As(runErr, &exitErr) {
-			rep.helpf("check that the command exists on PATH and its argv is valid")
-			return rep.fail(exitInput, kindInput, "run %q: %v", provStr, runErr)
-		}
-		status = fmt.Sprintf("exit %d", exitErr.ExitCode())
-		code := exitErr.ExitCode()
-		rep.rep.Exec.Exit = &code
+	case run.signal != "":
+		status = "killed by " + run.signal
 	default:
-		status = "exit 0"
-		zero := 0
-		rep.rep.Exec.Exit = &zero
+		code := run.state.ExitCode()
+		status = fmt.Sprintf("exit %d", code)
+		rep.rep.Exec.Exit = &code
 	}
+	if run.held {
+		// The image must not pass for the whole output of everything the
+		// command started: say so in the footnote, not only on stderr.
+		status += fmt.Sprintf(" · output cut %s later", execPipeGrace)
+		rep.warn("a background process still held the output %s after the command ended; "+
+			"taker killed what was left of the command's process group and closed the pipe, "+
+			"so nothing printed later is in the image", execPipeGrace)
+	}
+	out := run.out
 
 	transcript := "$ " + cmdStr + "\n" + string(out)
 	// A real terminal consumes escape sequences invisibly; a needle split by

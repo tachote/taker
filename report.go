@@ -133,6 +133,10 @@ type MarkReport struct {
 type ExecReport struct {
 	Exit     *int `json:"exit"`
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Signal names the signal that ended the command (SIGKILL, SIGSEGV),
+	// where exit is null: a signal is not an exit code, and the -1 Go
+	// reports for it read like one.
+	Signal string `json:"signal,omitempty"`
 }
 
 // ThemeReport is one palette, for --list-themes --json.
