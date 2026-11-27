@@ -58,3 +58,47 @@ func TestSnapStdinStripsANSIBeforeRedacting(t *testing.T) {
 		t.Errorf("command leaks the secret: %s", rep.Command)
 	}
 }
+
+// term and exec hash what they matched and drew, like snap and http. The raw
+// file still holds the ANSI-spliced secret in clear, so its sum — which is
+// also `sha256sum <file>` — would confirm a guess at the secret.
+func TestTermHashCoversTheNormalizedTranscript(t *testing.T) {
+	raw := "pass=Sup3r\x1b[31mD4ta!\x1b[0m\nok\n"
+	dir, file := writeTranscript(t, raw)
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runTerm(termCmd(TermCmd{
+			File: file, Output: filepath.Join(dir, "o.png"), JSON: true, DryRun: true,
+			Redact: []string{"Sup3rD4ta!"},
+		}), r)
+	})
+	if code != exitOK || rep.Redactions != 1 {
+		t.Fatalf("term = %d, redactions = %d, want the spliced secret boxed", code, rep.Redactions)
+	}
+	if len(rep.SHA256) != 1 {
+		t.Fatalf("sha256 = %+v", rep.SHA256)
+	}
+	if got := rep.SHA256[0].Sum; got == sha256Hex([]byte(raw)) {
+		t.Fatal("the transcript hash is sha256(raw file): a guessing oracle for the redacted secret")
+	}
+	if got, want := rep.SHA256[0].Sum, sha256Hex([]byte("pass=<redacted>\nok\n")); got != want {
+		t.Errorf("sha256 = %s, want %s (normalized, then masked)", got, want)
+	}
+}
+
+// exec hashes its transcript the same way: escapes stripped before masking.
+func TestExecHashCoversTheNormalizedTranscript(t *testing.T) {
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runExec(&ExecCmd{
+			Shell:  `printf 'pass=Sup3r\033[31mD4ta!\033[0m\n'`,
+			Redact: []string{"Sup3rD4ta!"}, DryRun: true, Timeout: 5,
+			Theme: "vscode-dark", Chrome: "window", WrapWidth: 80, JSON: true,
+		}, r)
+	})
+	if code != exitOK || rep.Redactions != 1 {
+		t.Fatalf("exec = %d, redactions = %d", code, rep.Redactions)
+	}
+	cmdLine := `$ printf 'pass=Sup3r\033[31mD4ta!\033[0m\n'` + "\n"
+	if got, want := rep.SHA256[0].Sum, sha256Hex([]byte(cmdLine+"pass=<redacted>\n")); got != want {
+		t.Errorf("sha256 = %s, want %s (normalized, then masked)", got, want)
+	}
+}

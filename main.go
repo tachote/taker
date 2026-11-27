@@ -1299,7 +1299,10 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	// stays hidden only if the pattern itself does the masking.
 	rep.secretRes = redactRe
 
-	rep.addInput("transcript", []byte(transcript))
+	// The hash covers the text that was matched and drawn, as snap and http
+	// do: the raw transcript still holds an ANSI-spliced secret in clear, and
+	// its sum would confirm guesses at it.
+	rep.addInput("transcript", stripped)
 	rep.metaKV = append(rep.metaKV, [2]string{"taker:exec", cmdStr})
 	rep.rep.Source = &Source{Kind: "exec", Path: cmdStr}
 	rep.scrubSecrets()
@@ -1382,7 +1385,10 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	// stays hidden only if the pattern itself does the masking.
 	rep.secretRes = redactRe
 
-	rep.addInput("transcript", src)
+	// Normalized, then masked — the same rule as every other mode. The raw
+	// file's sum would equal `sha256sum <file>` and verify guesses at a secret
+	// an escape sequence splices.
+	rep.addInput("transcript", stripped)
 	rep.rep.Source = &Source{Kind: "transcript", Path: cmd.File}
 	rep.scrubSecrets()
 

@@ -462,7 +462,15 @@ chunks (`taker:sha256`, `taker:command`, `taker:generated`, `taker:version`), so
 image that travels without the report still describes itself — with one
 exception: every `--redact` literal is replaced by `<redacted>` in `command`
 and in the PNG chunks, because a masked value must not leak through
-provenance. `redactions` counts
+provenance. Each `sha256` covers the input as taker matched and drew it, in
+every mode: first normalized (ANSI escapes stripped; BOM, zero-width and other
+invisible format characters removed), then masked (every `--redact` literal,
+its double-quoted form, its separator-split parts of 3 bytes or more, and
+every `--redact-re` match replaced by `<redacted>`, longest match first, left
+to right). A hash of the raw bytes would let anyone who holds the image
+confirm guesses at a short secret. So `sha256sum <file>` equals the reported
+sum only for a plain file with nothing redacted; to check any other run,
+apply the same two steps first. `redactions` counts
 the black boxes the footnote declares. For `taker exec`, `exec` carries the
 child command's outcome (`exit`, `timed_out`) — taker's own `exit` says the
 evidence was produced, `exec.exit` says what the command answered. `warnings`
