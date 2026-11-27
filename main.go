@@ -56,7 +56,7 @@ type SnapCmd struct {
 	DryRun     bool     `name:"dry-run" help:"Validate and report without writing the PNG."`
 	ListThemes bool     `name:"list-themes" help:"Print available themes and exit."`
 	JSON       bool     `name:"json" help:"Write a machine-readable report to stdout. Human messages stay on stderr."`
-	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, ~40% fewer tokens for agents."`
+	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, typically 25-40% fewer tokens than --json."`
 }
 
 // HTTPCmd renders HTTP request/response evidence. Both sides, one side, or a
@@ -81,7 +81,7 @@ type HTTPCmd struct {
 	Output     string   `short:"o" default:"output.png" help:"Output PNG file path."`
 	DryRun     bool     `name:"dry-run" help:"Validate and report without writing the PNG."`
 	JSON       bool     `name:"json" help:"Write a machine-readable report to stdout. Human messages stay on stderr."`
-	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, ~40% fewer tokens for agents."`
+	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, typically 25-40% fewer tokens than --json."`
 }
 
 // ExecCmd runs a command and renders the terminal session — the prompt line
@@ -106,7 +106,7 @@ type ExecCmd struct {
 	Shadow     bool     `name:"shadow" help:"Lift the window off the canvas with a drop shadow."`
 	DryRun     bool     `name:"dry-run" help:"Run the command and validate without writing the PNG."`
 	JSON       bool     `name:"json" help:"Write a machine-readable report to stdout. Human messages stay on stderr."`
-	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, ~40% fewer tokens for agents."`
+	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, typically 25-40% fewer tokens than --json."`
 }
 
 // TermCmd renders a saved terminal transcript (typescript, copied output)
@@ -128,7 +128,7 @@ type TermCmd struct {
 	Shadow     bool     `name:"shadow" help:"Lift the window off the canvas with a drop shadow."`
 	DryRun     bool     `name:"dry-run" help:"Validate and report without writing the PNG."`
 	JSON       bool     `name:"json" help:"Write a machine-readable report to stdout. Human messages stay on stderr."`
-	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, ~40% fewer tokens for agents."`
+	TOON       bool     `name:"toon" help:"Write the report as TOON — same document, typically 25-40% fewer tokens than --json."`
 }
 
 var cli struct {
