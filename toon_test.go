@@ -183,6 +183,25 @@ func TestExecFlagInsideCommandIsUsageError(t *testing.T) {
 	if !strings.Contains(out.String(), "taker exec <taker-flags> -- id") {
 		t.Errorf("no self-correcting hint:\n%s", out.String())
 	}
+
+	// An unknown flag in front of -- is kong's passthrough swallowing it,
+	// not a taker flag inside the command: name it as the unknown flag it
+	// is, and point at the help instead of a nonsense rewrite.
+	rep = newReporter("", "exec")
+	out.Reset()
+	rep.out = &out
+	code = runExec(&ExecCmd{
+		Args: []string{"-n", "1", "--", "echo", "hi"}, Output: "ignored.png",
+		Timeout: 5, Theme: "vscode-dark", Chrome: "window", WrapWidth: 80,
+	}, rep)
+	if code != exitUsage {
+		t.Fatalf("exec -n 1 -- echo hi = %d, want usage error", code)
+	}
+	if !strings.Contains(out.String(), `unknown flag \"-n\" for taker exec`) ||
+		!strings.Contains(out.String(), "taker exec --help") ||
+		strings.Contains(out.String(), "sitting inside") {
+		t.Errorf("error doc does not name the unknown flag:\n%s", out.String())
+	}
 }
 
 // The child's exit code is part of the evidence: the PNG's footnote shows it

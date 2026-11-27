@@ -15,6 +15,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -297,7 +298,7 @@ func newParser() *kong.Kong {
 
 func runSnap(cmd *SnapCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
-	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
+	if code := validateRedact(rep, os.Args[1:], cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
 		return code
 	}
 	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
@@ -538,7 +539,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 
 func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
-	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
+	if code := validateRedact(rep, os.Args[1:], cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
 		return code
 	}
 	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
@@ -1053,14 +1054,21 @@ func nonneg(rep *reporter, flag string, v int) int {
 // unprotected image: an empty needle never matches — and would have shipped a
 // "clean" capture — a negative keep is meaningless, and a needle of a char or
 // two masks half the alphabet (and the report's own words).
-func validateRedact(rep *reporter, literals, patterns []string, keep int) int {
+//
+// argv is taker's own part of the command line: the scan stops at "--",
+// after which every token is a file name or the executed command's, and
+// `taker exec -- ls -m` is not an empty -m.
+func validateRedact(rep *reporter, argv, literals, patterns []string, keep int) int {
 	// Kong drops an empty value from a string slice — "--redact ''" never
 	// reaches `literals`. The raw argv is the only faithful source, and an
 	// empty needle is the quietest possible footgun: a clean image, no
 	// warning, every secret visible.
-	for i, a := range os.Args {
+	if i := slices.Index(argv, "--"); i >= 0 {
+		argv = argv[:i]
+	}
+	for i, a := range argv {
 		if a == "--redact" || a == "--redact-re" || a == "--mark" || a == "--mark-re" || a == "-m" {
-			if i+1 >= len(os.Args) || os.Args[i+1] == "" {
+			if i+1 >= len(argv) || argv[i+1] == "" {
 				return rep.fail(exitUsage, kindUsage, "%s needs a non-empty value", a)
 			}
 		}
@@ -1228,19 +1236,32 @@ func finishTerminal(t *terminalRun, rep *reporter) int {
 	return rep.done(t.output)
 }
 
-// execFlagNames is every flag `taker exec` knows — used to catch the trap
+// execFlagNames is every flag `taker exec` defines — used to catch the trap
 // where one of them lands inside the command's argv instead of before --.
-// The value form `--flag=v` matches by prefix.
-var execFlagNames = map[string]bool{
-	"-o": true, "--output": true, "-t": true, "--title": true,
-	"-T": true, "--theme": true, "-L": true, "--label": true,
-	"-m": true, "--mark": true, "--mark-re": true, "--max-marks": true,
-	"--redact": true, "--redact-re": true, "--redact-keep": true,
-	"--wrap-width": true, "--chrome": true, "--shadow": true,
-	"--timeout": true, "--sh": true, "--dry-run": true,
-	"--json": true, "--toon": true, "-h": true, "--help": true,
-	"-n": true, "--lines": true, "-v": true, "--version": true,
-}
+// The value form `--flag=v` matches by prefix. It is read off kong's model,
+// not kept by hand: a hand list once named -n, --lines, -v and --version,
+// which exec does not have, and refused `head -n 2` and `grep -v` as taker
+// flags. The global -h and -v stay out on purpose — inside a command they
+// are the command's (grep -h, grep -v), and neither one misplaces evidence.
+var execFlagNames = sync.OnceValue(func() map[string]bool {
+	names := map[string]bool{}
+	// A throwaway struct, so building the model never touches the parsed cli.
+	var probe struct {
+		Exec ExecCmd `cmd:"exec"`
+	}
+	for _, n := range kong.Must(&probe).Model.Children {
+		for _, f := range n.Flags {
+			names["--"+f.Name] = true
+			for _, a := range f.Aliases {
+				names["--"+a] = true
+			}
+			if f.Short != 0 {
+				names["-"+string(f.Short)] = true
+			}
+		}
+	}
+	return names
+})
 
 // stdinHasData reports whether at least one byte is readable within the
 // grace period. A real producer — cat file | taker — has data in the pipe
@@ -1270,16 +1291,27 @@ func takerFlagIn(argv []string) string {
 		if i := strings.IndexByte(a, '='); i >= 0 {
 			name = a[:i]
 		}
-		if execFlagNames[name] {
+		if execFlagNames()[name] {
 			return a
 		}
 	}
 	return ""
 }
 
+// ownArgs is the part of argv that taker parsed itself. Kong hands exec
+// everything from the first positional on, verbatim, as the command — so a
+// tail of argv equal to it belongs to the command, and `taker exec id -o x -m`
+// must reach the trap below, not fail as an empty -m.
+func ownArgs(argv, passthrough []string) []string {
+	if n := len(argv) - len(passthrough); n >= 0 && slices.Equal(argv[n:], passthrough) {
+		return argv[:n]
+	}
+	return argv
+}
+
 func runExec(cmd *ExecCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
-	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
+	if code := validateRedact(rep, ownArgs(os.Args[1:], cmd.Args), cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
 		return code
 	}
 	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
@@ -1326,6 +1358,20 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 			if bad := takerFlagIn(argv); bad != "" {
 				rep.warn("%q after -- goes to the command; the PNG goes to %s", bad, cmd.Output)
 			}
+		} else if strings.HasPrefix(argv[0], "-") {
+			// Kong takes an unknown flag for the start of the command, so
+			// `taker exec --bogus` would run a program named "--bogus" and
+			// blame PATH, and `taker exec -n 1 -- id` would blame -n for
+			// sitting inside a command it was in front of. Name the cause.
+			if argv[0] == "--list-themes" {
+				rep.helpf("taker --list-themes")
+			} else {
+				rep.helpf("taker exec --help")
+			}
+			if slices.Contains(argv, "--") {
+				rep.helpf("only taker exec's own flags go before --; the command and its flags go after it")
+			}
+			return rep.fail(exitUsage, kindUsage, "unknown flag %q for taker exec", argv[0])
 		} else if bad := takerFlagIn(argv); bad != "" {
 			// The cold-start trap: `taker exec id -o out.png` runs
 			// "id -o out.png" and writes the evidence to the default path —
@@ -1443,7 +1489,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 
 func runTerm(cmd *TermCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
-	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
+	if code := validateRedact(rep, os.Args[1:], cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
 		return code
 	}
 	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
@@ -1691,13 +1737,13 @@ func clampWrapWidth(w int, httpMode bool, rep *reporter) int {
 func resolveTheme(name string) (*render.Theme, error) {
 	theme, ok := render.Themes[strings.ToLower(name)]
 	if !ok {
-		return nil, fmt.Errorf("unknown theme %q. Run --list-themes to see options.", name)
+		return nil, fmt.Errorf("unknown theme %q — run 'taker --list-themes' to see options", name)
 	}
 	// Its style only covers the HTTP lexer's token types, so source code comes
 	// out flat — every keyword falling back to the plain text color.
 	if theme.HTTPOnly {
-		return nil, fmt.Errorf("theme %q is only for `taker http`; source code renders without highlighting.\n"+
-			"       Use vscode-dark (default) or run --list-themes.", name)
+		return nil, fmt.Errorf("theme %q is only for `taker http` (source code renders without highlighting) — "+
+			"use vscode-dark (default) or run 'taker --list-themes'", name)
 	}
 	return theme, nil
 }
