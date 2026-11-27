@@ -243,6 +243,15 @@ func main() {
 		rep := newReporter(argvFormat(os.Args[1:]), mode)
 		rep.argv = os.Args
 		rep.secrets = argvNeedleValues(os.Args[1:])
+		// The patterns' MATCHES are secrets too, and a parse error is the
+		// earliest failure there is: a typo in any flag echoed a file name
+		// such as tok_ABC123.py in the command, in kong's "unexpected
+		// argument" message and on stderr. A pattern that does not compile
+		// cannot scrub anything; its own text is already masked above.
+		if res, err := compileRegex("--redact-re", argvRedactRe(os.Args[1:])); err == nil {
+			rep.secretRes = res
+		}
+		rep.scrubSecrets()
 		// The mode's own help: `taker --help` lists only the commands. The
 		// flags also travel inline, so an agent can fix the call without a
 		// second round trip.
@@ -1243,6 +1252,34 @@ func argvNeedleValues(args []string) []string {
 		}
 		if i+1 < len(args) {
 			out = append(out, args[i+1])
+		}
+	}
+	return out
+}
+
+// argvRedactRe collects the --redact-re values off the raw argv, for the
+// parse-error path, split on unescaped commas the way kong splits a parsed
+// flag list — compileRegex then rejoins a pattern whose commas kong would
+// have cut, exactly as it does on the parsed path.
+func argvRedactRe(args []string) []string {
+	var out []string
+	for i, a := range args {
+		if a == "--" {
+			break
+		}
+		var val string
+		switch {
+		case strings.HasPrefix(a, "--redact-re="):
+			val = strings.TrimPrefix(a, "--redact-re=")
+		case a == "--redact-re" && i+1 < len(args):
+			val = args[i+1]
+		default:
+			continue
+		}
+		for _, p := range kong.SplitEscaped(val, ',') {
+			if p != "" {
+				out = append(out, p)
+			}
 		}
 	}
 	return out

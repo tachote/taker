@@ -364,6 +364,11 @@ func TestRedactReScrubsEarlyFailures(t *testing.T) {
 		{"json and toon", []string{"snap", name + ".py", "--redact-re", "tok_[A-Z0-9]+", "--json", "--toon"}},
 		{"term missing file", []string{"term", "tok_ZZZ999.log", "--redact-re", "tok_[A-Z0-9]+", "--json"}},
 		{"http bad flag combo", []string{"http", "-f", name + ".http", "-r", name + ".http", "--redact-re", "tok_[A-Z0-9]+", "--json"}},
+		// A parse error is the earliest failure: kong dies before any
+		// run function compiles the pattern.
+		{"unknown flag", []string{name + ".py", "--redact-re", "tok_[A-Z0-9]+", "--bogus", "-o", "x.png", "--json"}},
+		{"unexpected argument", []string{"http", name + ".http", "--redact-re", "tok_[A-Z0-9]+", "-o", "x.png", "--json"}},
+		{"unexpected argument, = form", []string{"http", name + ".http", "--redact-re=tok_[A-Z0-9]+", "--json"}},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			dir := t.TempDir()
