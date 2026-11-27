@@ -51,6 +51,11 @@ type HTTPConfig struct {
 	// RedactRe hides compiled-pattern matches the same way — a JWT or bearer
 	// shape is a pattern, not a literal.
 	RedactRe []*regexp.Regexp
+	// RedactFrag hides parts of the Redact literals, as whole-token patterns
+	// built by the caller: a server that echoes only a fragment of a secret
+	// must not leave it readable. Unlike Redact, a fragment that matched
+	// nothing is not warned about — nobody asked for it by name.
+	RedactFrag []*regexp.Regexp
 	// RedactKeep leaves this many leading characters of each match visible
 	// (sk_l…████) so the box still identifies what was hidden.
 	RedactKeep int
@@ -85,6 +90,20 @@ type HTTPConfig struct {
 	// the image reads the numbers from here instead of recomputing the trim and
 	// hoping the two agree.
 	Facts *HTTPFacts
+}
+
+// RedactKeepError refuses a render in which RedactKeep would leave whole
+// matches visible: each such match is RedactKeep characters long or shorter,
+// so shifting its box right by RedactKeep leaves no box at all. It is the
+// caller's misuse rather than a render failure, so it has its own type.
+type RedactKeepError struct {
+	Keep    int // the RedactKeep that was asked for
+	Exposed int // matches that would be drawn in full
+}
+
+func (e *RedactKeepError) Error() string {
+	return fmt.Sprintf("--redact-keep %d leaves %d match(es) fully visible (each %d char(s) or shorter) — lower it or drop it",
+		e.Keep, e.Exposed, e.Keep)
 }
 
 // warnf routes a render warning through Warn the way Config.warnf does, so the
@@ -229,6 +248,20 @@ func tokenizeHTTP(msg string, style *chroma.Style) ([]highlight.LineTokens, http
 		bodyLines[i].LineNum += layout.body
 	}
 	return append(lines, bodyLines...), layout, nil
+}
+
+// HTTPLineCount is the number of the last line RenderHTTP numbers in msg. The
+// caller parses --nr/--hr against it before rendering: a line spec is expanded
+// one entry per line, and "1-999999999" on a 20-line capture must clamp to the
+// capture instead of allocating a gigabyte or being refused. A trailing
+// newline closes the last line rather than opening one, as in Tokenize.
+func HTTPLineCount(msg string) int {
+	raw := messageLines(msg)
+	n := len(raw)
+	if n > 1 && raw[n-1] == "" {
+		n--
+	}
+	return n
 }
 
 // messageLines splits a message on the lines Tokenize numbers: chroma turns
@@ -569,6 +602,10 @@ type HTTPFacts struct {
 	Request  PanelFacts
 	Response PanelFacts
 	Marks    []highlight.MarkStats
+	// Shown is, per Marks entry, how many kept occurrences sit on a line the
+	// trimmed panels still show — what the image boxes, not what the
+	// capture holds.
+	Shown    []int
 	Redacted int // black boxes drawn across both panels
 }
 
@@ -654,14 +691,21 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			resHL = resHL.Merge(m)
 		}
 	}
+	// --hr and --mark on the same value draw one box: unioned, the spans no
+	// longer nest a border inside the value. Normalize copies, so the
+	// caller's maps stay as they were handed in.
+	reqHL, resHL = reqHL.Normalize(), resHL.Normalize()
 
 	// Redact literals are hidden, not marked — found the same way but painted
 	// over rather than boxed in red. They never merge into HighlightLines.
 	redact, redactStats := highlight.FindMarks(msgs, cfg.Redact, 0)
 	redactRe, redactReStats := highlight.FindRegexMarks(msgs, cfg.RedactRe, 0)
+	redactFrag, _ := highlight.FindRegexMarks(msgs, cfg.RedactFrag, 0)
 	var reqRedact, resRedact highlight.Marks
+	consumed := 0
 	for i, side := range sideOf {
-		m, _ := highlight.KeepSpans(redact[i].Merge(redactRe[i]), cfg.RedactKeep)
+		m, c := highlight.KeepSpans(redact[i].Merge(redactRe[i]).Merge(redactFrag[i]), cfg.RedactKeep)
+		consumed += c
 		if side == 0 {
 			reqRedact = reqRedact.Merge(m)
 		} else {
@@ -678,13 +722,11 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			cfg.warnf("--redact-re %q matched nothing", st.Literal)
 		}
 	}
-	if cfg.RedactKeep > 0 && reqRedact == nil && resRedact == nil {
-		for _, st := range append(redactStats, redactReStats...) {
-			if st.Matches > 0 {
-				cfg.warnf("--redact-keep %d leaves nothing hidden", cfg.RedactKeep)
-				break
-			}
-		}
+	// A match RedactKeep characters long or shorter keeps nothing hidden and
+	// would be drawn in full. That used to be a warning, and only when every
+	// match was consumed; one exposed secret among five is just as exposed.
+	if consumed > 0 {
+		return nil, &RedactKeepError{Keep: cfg.RedactKeep, Exposed: consumed}
 	}
 
 	// Counted before the trim: the view has to be able to state its own extent.
@@ -696,13 +738,15 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	// center on, so the warning is decided here, per panel: the caller cannot
 	// know before tokenizing whether a --mark literal landed on this side.
 	reqSpec, resSpec := cfg.RequestLines, cfg.ResponseLines
-	if s := highlight.ContextSpec(reqHL, cfg.Context); s != nil {
+	// Windows clamp to the panel's own last line before they are expanded:
+	// "--context 10000000" costs a few lines, not a gigabyte.
+	if s := highlight.ContextSpecMax(reqHL, cfg.Context, totalReq); s != nil {
 		if reqSpec != nil {
 			cfg.warnf("--context overrides --nr; ignoring it")
 		}
 		reqSpec = s
 	}
-	if s := highlight.ContextSpec(resHL, cfg.Context); s != nil {
+	if s := highlight.ContextSpecMax(resHL, cfg.Context, totalRes); s != nil {
 		if resSpec != nil {
 			cfg.warnf("--context overrides --ns; ignoring it")
 		}
@@ -737,6 +781,19 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			cfg.Facts.Response = PanelFacts{ViewExtent: highlight.Extent(resLines), Total: totalRes, Present: true}
 		}
 		cfg.Facts.Marks = stats
+		// Indexed like msgs: a lone response is message 0.
+		var views [][]highlight.LineTokens
+		for _, side := range sideOf {
+			if side == 0 {
+				views = append(views, reqLines)
+			} else {
+				views = append(views, resLines)
+			}
+		}
+		cfg.Facts.Shown = make([]int, len(stats))
+		for i, st := range stats {
+			cfg.Facts.Shown[i] = st.Shown(views...)
+		}
 	}
 
 	// Tabs read the whole capture, not the trimmed view: in Burp an editor tab

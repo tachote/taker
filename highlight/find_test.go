@@ -227,6 +227,29 @@ func TestMarkStatsKept(t *testing.T) {
 	}
 }
 
+// Shown counts only the kept matches on a line the view still holds: a trim
+// can leave a kept match out of the image, and kept alone overclaims.
+func TestMarkStatsShown(t *testing.T) {
+	req := linesOf("GET /a?t=abc HTTP/1.1", "Host: x")
+	res := linesOf("HTTP/1.1 200", "abc abc", "abc-3")
+	_, stats := FindMarks([][]LineTokens{req, res}, []string{"abc"}, 0)
+	st := stats[0]
+	if got := st.Shown(req, res); got != 4 {
+		t.Errorf("untrimmed views show %d, want all 4", got)
+	}
+	resTrim := FilterLines(res, []int{1, 3})
+	if got := st.Shown(req, resTrim); got != 2 {
+		t.Errorf("response trimmed to lines 1,3 shows %d, want 2 (line 1 of the request, line 3)", got)
+	}
+	if got := st.Shown(FilterLines(req, []int{2}), FilterLines(res, []int{1})); got != 0 {
+		t.Errorf("views without a match show %d, want 0", got)
+	}
+	// A view missing for a message counts nothing there, rather than panicking.
+	if got := st.Shown(req); got != 1 {
+		t.Errorf("request view alone shows %d, want 1", got)
+	}
+}
+
 // A needle with bytes that are not UTF-8 cannot match the drawn text, which is
 // all valid runes. It must count as no match — not match inside "é", and not
 // panic compiling the pattern a tab needle becomes.

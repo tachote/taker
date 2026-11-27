@@ -10,10 +10,10 @@ import (
 )
 
 // --toon emits the same report as --json in TOON (toonformat.dev): the format
-// agents read cheapest — tables for uniform rows, no repeated keys, ~40%
-// fewer tokens than the equivalent JSON. The report's schema is fixed, so the
-// encoder only needs objects, scalars, primitive arrays, and arrays of
-// uniform objects — the shapes this tool produces.
+// agents read cheapest — tables for uniform rows, no repeated keys, typically
+// 25-40% fewer tokens than the equivalent indented JSON. The report's schema
+// is fixed, so the encoder only needs objects, scalars, primitive arrays, and
+// arrays of uniform objects — the shapes this tool produces.
 //
 // Field order is preserved by decoding the marshaled JSON with a token
 // stream instead of a map: a report that reorders its keys between runs would

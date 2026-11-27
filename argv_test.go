@@ -137,13 +137,30 @@ func TestCompileRegexCommaRejoin(t *testing.T) {
 // pattern. unbalancedRE counts it anyway, so the next --redact-re is glued on
 // with a comma and neither pattern matches what it was given for.
 func TestCompileRegexKeepsClassBracketPatternsApart(t *testing.T) {
-	t.Skip("TODO(P9): unbalancedRE counts brackets inside a character class, so `--redact-re '=[^)]+' --redact-re 'sekrit[0-9]+'` fuses into one pattern and redacts nothing")
-	res, err := compileRegex("--redact-re", []string{`=[^)]+`, `sekrit[0-9]+`})
+	for _, in := range [][]string{
+		{`=[^)]+`, `sekrit[0-9]+`},
+		{`[(]tok`, `sekrit[0-9]+`},
+		{`x[{]`, `sekrit[0-9]+`},
+		{`[]a]+`, `sekrit[0-9]+`},
+		{`[^]a]+`, `sekrit[0-9]+`},
+		{`[[:alpha:]]+`, `sekrit[0-9]+`},
+		{`[\]]+`, `sekrit[0-9]+`},
+	} {
+		res, err := compileRegex("--redact-re", in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Errorf("compileRegex(%q): got %d patterns %v, want the two that were given", in, len(res), res)
+		}
+	}
+	// A class kong cut in half is still rejoined.
+	res, err := compileRegex("--redact-re", []string{`[a`, `)]+`})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 2 {
-		t.Fatalf("got %d patterns %v, want the two that were given", len(res), res)
+	if len(res) != 1 || res[0].String() != `[a,)]+` {
+		t.Errorf("split class with a bracket member = %v, want [a,)]+", res)
 	}
 }
 
@@ -240,5 +257,150 @@ func TestSuccessPathMasksNeedlesInCommand(t *testing.T) {
 	}
 	if rep.Mode != "term" || rep.Redactions == 0 {
 		t.Errorf("mode=%q redactions=%d, want term with the secret boxed", rep.Mode, rep.Redactions)
+	}
+}
+
+// A comma is ordinary text in a --mark literal: function calls, CSV and JSON
+// values hold them. Kong's default list split turned -m "foo(a, b)" into two
+// needles, two boxes and no warning — a silent mis-mark.
+func TestMarkKeepsItsCommas(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"a.py":   "foo(a, b)\nbar\n",
+		"t.log":  "$ run\nfoo(a, b)\n",
+		"r.http": "POST / HTTP/1.1\r\nHost: x\r\n\r\nfoo(a, b)",
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		args    []string
+		matches int
+	}{
+		{[]string{"a.py"}, 1},
+		{[]string{"term", "t.log"}, 1},
+		{[]string{"http", "-r", "r.http"}, 1},
+		// The prompt line echoes the command, so the literal is there twice.
+		{[]string{"exec", "--sh", "echo 'foo(a, b)'"}, 2},
+	} {
+		args := tc.args
+		t.Run(args[0], func(t *testing.T) {
+			full := append(slices.Clone(args), "-m", "foo(a, b)", "--dry-run", "--json")
+			code, stdout, stderr := runTaker(t, dir, full...)
+			if code != exitOK {
+				t.Fatalf("exit = %d\nstdout:\n%s\nstderr:\n%s", code, stdout, stderr)
+			}
+			var rep Report
+			if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+				t.Fatalf("not a json report: %v\n%s", err, stdout)
+			}
+			if len(rep.Marks) != 1 || rep.Marks[0].Needle != "foo(a, b)" || rep.Marks[0].Matches != tc.matches {
+				t.Errorf("marks = %+v, want one needle \"foo(a, b)\" with %d match(es)", rep.Marks, tc.matches)
+			}
+		})
+	}
+}
+
+// A refused command line still gets the right mode, format and help: the
+// mode comes from the first positional token (skipping flags and their
+// values), the format from --json/--toon in any spelling kong accepts, and
+// the help names the mode's own --help plus its flags inline.
+func TestParseErrorErgonomics(t *testing.T) {
+	app := newParser().Model
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"http", "--bogus"}, "http"},
+		{[]string{"--json", "http", "-r", "r.http", "--bogus"}, "http"},
+		{[]string{"app.py", "-t", "http", "--bogus"}, "snap"},
+		{[]string{"-t", "exec", "app.py", "--bogus"}, "snap"},
+		{[]string{"-o=x.png", "term", "--bogus"}, "term"},
+		{[]string{"--bogus"}, "snap"},
+		{[]string{"--", "exec"}, "exec"},
+	} {
+		if got := parseErrorMode(app, tc.args); got != tc.want {
+			t.Errorf("parseErrorMode(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--json"}, "json"},
+		{[]string{"--json=true"}, "json"},
+		{[]string{"--toon=1"}, "toon"},
+		{[]string{"--json=false"}, ""},
+		{[]string{"--json", "--json=false"}, ""},
+		{[]string{"exec", "--", "curl", "--json"}, ""},
+	} {
+		if got := argvFormat(tc.args); got != tc.want {
+			t.Errorf("argvFormat(%q) = %q, want %q", tc.args, got, tc.want)
+		}
+	}
+
+	dir := t.TempDir()
+	code, stdout, _ := runTaker(t, dir, "snap", "app.py", "--json=true", "--bogus")
+	var rep Report
+	if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+		t.Fatalf("--json=true did not give JSON: %v\n%s", err, stdout)
+	}
+	if code != exitUsage || rep.Mode != "snap" || len(rep.Help) != 2 ||
+		rep.Help[0] != "run 'taker snap --help' for the valid flags" ||
+		!strings.Contains(rep.Help[1], "--lines") || !strings.Contains(rep.Help[1], "--git") {
+		t.Errorf("snap parse error = %d, mode %q, help %q", code, rep.Mode, rep.Help)
+	}
+	code, stdout, _ = runTaker(t, dir, "--json", "http", "-r", "r.http", "--bogus")
+	rep = Report{}
+	if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+		t.Fatalf("not JSON: %v\n%s", err, stdout)
+	}
+	if code != exitUsage || rep.Mode != "http" || len(rep.Help) == 0 || !strings.Contains(rep.Help[0], "taker http --help") {
+		t.Errorf("flag before http = %d, mode %q, help %q", code, rep.Mode, rep.Help)
+	}
+}
+
+// A theme refusal is one plain sentence in error.message — no embedded
+// newline or continuation indent — and the next command is in help[], where a
+// script finds it. The HTTP-only refusal names what the mode actually draws.
+func TestThemeErrorsCarryTheHint(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "t.txt"), []byte("$ id\nuid=0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"snap unknown", []string{"a.py", "-T", "nope", "--json", "--dry-run"}, `unknown theme "nope"`},
+		{"snap http-only", []string{"a.py", "-T", "burp", "--json", "--dry-run"}, "(source code renders without highlighting)"},
+		{"term http-only", []string{"term", "t.txt", "-T", "burp", "--json", "--dry-run"}, "(a transcript renders without highlighting)"},
+		{"exec http-only", []string{"exec", "-T", "burp", "--json", "--dry-run", "--", "true"}, "(a transcript renders without highlighting)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runTaker(t, dir, tc.args...)
+			if code != exitUsage {
+				t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitUsage, stdout, stderr)
+			}
+			var rep Report
+			if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+				t.Fatalf("not a json report: %v\n%s", err, stdout)
+			}
+			msg := rep.Error.Message
+			if !strings.Contains(msg, tc.want) {
+				t.Errorf("error.message = %q, want %q", msg, tc.want)
+			}
+			if strings.ContainsAny(msg, "\n") || strings.Contains(msg, "list-themes") || strings.HasSuffix(msg, ".") {
+				t.Errorf("error.message = %q, want one plain sentence without the hint", msg)
+			}
+			if !slices.ContainsFunc(rep.Help, func(h string) bool { return strings.Contains(h, "taker --list-themes") }) {
+				t.Errorf("help = %q, want the taker --list-themes hint", rep.Help)
+			}
+		})
 	}
 }

@@ -33,14 +33,16 @@
       "matches": 1,
       "lines": 1,
       "kept": 1,
-      "dropped": 0
+      "dropped": 0,
+      "shown": 1
     },
     {
       "needle": "nowhere",
       "matches": 0,
       "lines": 0,
       "kept": 0,
-      "dropped": 0
+      "dropped": 0,
+      "shown": 0
     }
   ],
   "warnings": [

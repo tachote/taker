@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -367,6 +368,25 @@ func TestDryRunWritesNothing(t *testing.T) {
 	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Error("dry run wrote the PNG it promised not to")
 	}
+	// "The same document": a preflight that omits the crop cannot be used to
+	// check what the image would show. Compare against a real run's crop.
+	trim := func(dry bool) *Crop {
+		t.Helper()
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Output: out, Lines: "2", DryRun: dry, JSON: true}), r)
+		})
+		if code != exitOK {
+			t.Fatalf("dry=%v run = %d", dry, code)
+		}
+		return rep.Crop
+	}
+	dry, real := trim(true), trim(false)
+	if dry == nil || real == nil {
+		t.Fatalf("crop: dry run %+v, real run %+v; want both present", dry, real)
+	}
+	if dry.First != 2 || dry.Last != 2 || dry.Shown != 1 || !reflect.DeepEqual(dry, real) {
+		t.Errorf("dry-run crop = %+v, real-run crop = %+v; want both lines 2-2 of 2", dry, real)
+	}
 }
 
 // The report carries the same provenance the PNG embeds: input hashes and the
@@ -602,6 +622,42 @@ func TestHTTPFValidation(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("no 'no response section' warning in %v", rep.Warnings)
+	}
+}
+
+// An HTTP/2 request copied in pseudo-header form has no request line. The
+// renderer draws it, so -r and a request-only -f accept it too; a log file
+// that merely mentions a header is still refused.
+func TestHTTP2PseudoHeaderRequest(t *testing.T) {
+	dir := t.TempDir()
+	h2 := filepath.Join(dir, "h2_req.http")
+	if err := os.WriteFile(h2, []byte(":method: POST\n:path: /api/users\n:authority: a.test\n:scheme: https\ncontent-type: application/json\n\n{\"a\":1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := filepath.Join(dir, "res.http")
+	if err := os.WriteFile(res, []byte("HTTP/2 201\ncontent-type: application/json\n\n{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []HTTPCmd{
+		{Request: h2, Response: res},
+		{Request: h2},
+		{File: h2},
+	} {
+		c.DryRun, c.JSON = true, true
+		code, rep, _ := runJSON(t, func(r *reporter) int { return runHTTP(&c, r) })
+		if code != exitOK || rep.Panels == nil || rep.Panels.Request == nil {
+			t.Errorf("%+v = %d (%v), want the request rendered", c, code, rep.Error)
+		}
+	}
+	logf := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(logf, []byte("2026-01-01 :method: GET seen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{Request: logf, DryRun: true, JSON: true}, r)
+	})
+	if code != exitInput || rep.Error == nil || !strings.Contains(rep.Error.Message, ":method pseudo header") {
+		t.Errorf("log file as -r = %d (%v), want an input error naming both request forms", code, rep.Error)
 	}
 }
 
@@ -1097,6 +1153,55 @@ func TestReportGolden(t *testing.T) {
 		}
 		if got != string(want) {
 			t.Errorf("%s report drifted from %s:\n--- got\n%s\n--- want\n%s", format, golden, got, want)
+		}
+	}
+}
+
+// kept counts the whole input; shown counts what the image boxes. A trim that
+// leaves the only match outside the view used to report kept=1 on an image
+// with no mark at all.
+func TestMarkShownCountsOnlyTheView(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.py")
+	if err := os.WriteFile(file, []byte("import os\nx = 1\ny = 2\nimport re\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		lines string
+		shown int
+	}{{"2-3", 0}, {"3-4", 1}, {"", 2}} {
+		_, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Lines: tc.lines, Mark: []string{"import"}, DryRun: true, JSON: true}), r)
+		})
+		if len(rep.Marks) != 1 || rep.Marks[0].Kept != 2 || rep.Marks[0].Shown != tc.shown {
+			t.Errorf("--lines %q: marks = %+v, want kept 2, shown %d", tc.lines, rep.Marks, tc.shown)
+		}
+	}
+
+	// http: each panel is trimmed on its own, and a lone response is the
+	// renderer's message 0.
+	req := filepath.Join(dir, "r.http")
+	res := filepath.Join(dir, "s.http")
+	if err := os.WriteFile(req, []byte("GET /a HTTP/1.1\r\nHost: x.test\r\nX-A: import\r\n\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(res, []byte("HTTP/1.1 200 OK\r\nX: import\r\n\r\nimport\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cmd   HTTPCmd
+		kept  int
+		shown int
+	}{
+		{HTTPCmd{Request: req, Response: res, ReqLines: "1-2"}, 3, 2},
+		{HTTPCmd{Request: req, Response: res}, 3, 3},
+		{HTTPCmd{Response: res, ResLines: "1"}, 2, 0},
+	} {
+		c := tc.cmd
+		c.Mark, c.DryRun, c.JSON = []string{"import"}, true, true
+		_, rep, _ := runJSON(t, func(r *reporter) int { return runHTTP(&c, r) })
+		if len(rep.Marks) != 1 || rep.Marks[0].Kept != tc.kept || rep.Marks[0].Shown != tc.shown {
+			t.Errorf("%+v: marks = %+v, want kept %d, shown %d", tc.cmd, rep.Marks, tc.kept, tc.shown)
 		}
 	}
 }

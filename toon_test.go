@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"os"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -23,8 +24,8 @@ func TestReportTOONEncoding(t *testing.T) {
 	total := 68
 	rep.rep.Crop = &Crop{First: 3, Last: 19, Shown: 14, Total: &total}
 	rep.rep.Marks = []MarkReport{
-		{Needle: "os.system", Matches: 4, Lines: 4, Kept: 4, Dropped: 0},
-		{Needle: "sha256", Matches: 1, Lines: 1, Kept: 1, Dropped: 0},
+		{Needle: "os.system", Matches: 4, Lines: 4, Kept: 4, Dropped: 0, Shown: 3},
+		{Needle: "sha256", Matches: 1, Lines: 1, Kept: 1, Dropped: 0, Shown: 1},
 	}
 	rep.rep.SHA256 = []SourceHash{{Name: "source", Sum: "b94d"}}
 	rep.rep.Warnings = []string{"--mark fell outside the view"}
@@ -39,7 +40,7 @@ func TestReportTOONEncoding(t *testing.T) {
 		"tool: taker\n",
 		"ok: true\n",
 		// Tables collapse repeated keys — the point of the format.
-		"marks[2]{needle,matches,lines,kept,dropped}:\n  os.system,4,4,4,0\n  sha256,1,1,1,0\n",
+		"marks[2]{needle,matches,lines,kept,dropped,shown}:\n  os.system,4,4,4,0,3\n  sha256,1,1,1,0,1\n",
 		"sha256[1]{name,sum}:\n  source,b94d\n",
 		// Nested objects indent under their key.
 		"source:\n  kind: file\n  path: src/a.go\n",
@@ -183,6 +184,25 @@ func TestExecFlagInsideCommandIsUsageError(t *testing.T) {
 	if !strings.Contains(out.String(), "taker exec <taker-flags> -- id") {
 		t.Errorf("no self-correcting hint:\n%s", out.String())
 	}
+
+	// An unknown flag in front of -- is kong's passthrough swallowing it,
+	// not a taker flag inside the command: name it as the unknown flag it
+	// is, and point at the help instead of a nonsense rewrite.
+	rep = newReporter("", "exec")
+	out.Reset()
+	rep.out = &out
+	code = runExec(&ExecCmd{
+		Args: []string{"-n", "1", "--", "echo", "hi"}, Output: "ignored.png",
+		Timeout: 5, Theme: "vscode-dark", Chrome: "window", WrapWidth: 80,
+	}, rep)
+	if code != exitUsage {
+		t.Fatalf("exec -n 1 -- echo hi = %d, want usage error", code)
+	}
+	if !strings.Contains(out.String(), `unknown flag \"-n\" for taker exec`) ||
+		!strings.Contains(out.String(), "taker exec --help") ||
+		strings.Contains(out.String(), "sitting inside") {
+		t.Errorf("error doc does not name the unknown flag:\n%s", out.String())
+	}
 }
 
 // The child's exit code is part of the evidence: the PNG's footnote shows it
@@ -204,9 +224,10 @@ func TestExecReportCarriesChildExit(t *testing.T) {
 	}
 }
 
-// stdinHasData distinguishes a live producer from a pipe nobody will write:
-// buffered data returns instantly, an empty pipe trips the grace period.
-func TestStdinHasData(t *testing.T) {
+// probeStdin distinguishes a live producer from a pipe nobody will write:
+// buffered data returns instantly, an empty open pipe trips the grace period,
+// and a pipe closed with nothing in it is empty input, not a slow one.
+func TestProbeStdin(t *testing.T) {
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
@@ -216,8 +237,8 @@ func TestStdinHasData(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.Close()
-	if !stdinHasData(bufio.NewReader(r), 200*time.Millisecond) {
-		t.Error("data already in the pipe should report ready")
+	if got := probeStdin(bufio.NewReader(r), 200*time.Millisecond); got != stdinData {
+		t.Errorf("data already in the pipe = %v, want ready", got)
 	}
 
 	r2, w2, err := os.Pipe()
@@ -227,11 +248,25 @@ func TestStdinHasData(t *testing.T) {
 	defer r2.Close()
 	defer w2.Close() // write end held open, nothing written — the agent's pipe
 	start := time.Now()
-	if stdinHasData(bufio.NewReader(r2), 120*time.Millisecond) {
-		t.Error("an empty open pipe should report no data")
+	if got := probeStdin(bufio.NewReader(r2), 120*time.Millisecond); got != stdinStalled {
+		t.Errorf("an empty open pipe = %v, want stalled", got)
 	}
 	if time.Since(start) > 2*time.Second {
 		t.Error("the probe should not block on an empty pipe")
+	}
+
+	r3, w3, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r3.Close()
+	w3.Close()
+	start = time.Now()
+	if got := probeStdin(bufio.NewReader(r3), 2*time.Second); got != stdinEOF {
+		t.Errorf("a closed empty pipe = %v, want EOF", got)
+	}
+	if time.Since(start) > time.Second {
+		t.Error("EOF should be reported at once, not after the grace period")
 	}
 }
 
@@ -262,5 +297,35 @@ func TestTOONEndsWithOneNewline(t *testing.T) {
 	rep.emit(exitOK)
 	if !strings.HasSuffix(got, "\n") || strings.HasSuffix(got, "\n\n") {
 		t.Errorf("toon document should end in exactly one newline: %q", got[max(0, len(got)-12):])
+	}
+}
+
+// An ldflag version wins; otherwise the toolchain's module version, then the
+// commit, so a go install or go build binary no longer stamps "dev" into the
+// PNG's provenance.
+func TestResolveVersion(t *testing.T) {
+	info := func(main string, settings ...debug.BuildSetting) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			return &debug.BuildInfo{Main: debug.Module{Version: main}, Settings: settings}, true
+		}
+	}
+	rev := debug.BuildSetting{Key: "vcs.revision", Value: "8a8a2fe7bcca0123456789"}
+	dirty := debug.BuildSetting{Key: "vcs.modified", Value: "true"}
+	for _, tc := range []struct {
+		name, ldflag string
+		read         func() (*debug.BuildInfo, bool)
+		want         string
+	}{
+		{"ldflag kept", "0.3.0", info("v0.1.0"), "0.3.0"},
+		{"go install", "dev", info("v0.1.0"), "0.1.0"},
+		{"pseudo-version", "dev", info("v0.3.1-0.20261127205238-8a8a2fe7bcca", rev), "0.3.1-0.20261127205238-8a8a2fe7bcca"},
+		{"devel with commit", "dev", info("(devel)", rev), "dev+8a8a2fe7bcca"},
+		{"devel dirty", "dev", info("(devel)", rev, dirty), "dev+8a8a2fe7bcca.dirty"},
+		{"devel, no vcs", "dev", info("(devel)"), "dev"},
+		{"no build info", "dev", func() (*debug.BuildInfo, bool) { return nil, false }, "dev"},
+	} {
+		if got := resolveVersion(tc.ldflag, tc.read); got != tc.want {
+			t.Errorf("%s: resolveVersion = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

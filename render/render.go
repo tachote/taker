@@ -544,15 +544,20 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 		l = buildLayout(cfg, m, vlines, digits, gutterW)
 	}
 
+	// The fix has to be one the caller has: a transcript (taker exec, taker
+	// term) has no --context or line range, so naming them sends the analyst
+	// hunting for flags that do not exist.
+	trim, tall := "trim it with --context or a line range", "--context or a line range makes it readable"
+	if cfg.Terminal {
+		trim, tall = "trim the transcript to the lines that prove the finding", "a shorter transcript makes it readable"
+	}
 	// Refuse before allocating: a 130000px canvas is ~580MB and unviewable.
 	if l.totalHeight > maxImageHeight {
-		return nil, fmt.Errorf(
-			"%q needs %dpx of height, past the %dpx browsers can decode — "+
-				"trim it with --context or a line range",
-			cfg.Title, l.totalHeight, maxImageHeight)
+		return nil, fmt.Errorf("%q needs %dpx of height, past the %dpx browsers can decode — %s",
+			cfg.Title, l.totalHeight, maxImageHeight, trim)
 	}
 	if l.totalHeight > warnImageHeight && !cfg.noWarn {
-		cfg.warnf("%q is %dpx tall; --context or a line range makes it readable", cfg.Title, l.totalHeight)
+		cfg.warnf("%q is %dpx tall; %s", cfg.Title, l.totalHeight, tall)
 	}
 
 	// The redaction count is pure geometry, and the footnote that declares it

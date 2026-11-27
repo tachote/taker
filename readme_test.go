@@ -166,3 +166,32 @@ func writeFile(t *testing.T, path string, data []byte, mode os.FileMode) {
 		t.Fatal(err)
 	}
 }
+
+// TestREADMEScreenshotCommandsMatchRegen pins the README's screenshot
+// commands to the ones assets/regen.sh runs. The images embed the command
+// that made them; a README that shows a different command (the repo's own
+// source instead of the frozen fixture) promises a picture it cannot produce.
+func TestREADMEScreenshotCommandsMatchRegen(t *testing.T) {
+	regen, err := os.ReadFile(filepath.Join("assets", "regen.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	for _, l := range strings.Split(string(regen), "\n") {
+		if !strings.HasPrefix(l, "shot ") {
+			continue
+		}
+		n++
+		want := "taker " + strings.TrimPrefix(l, "shot ")
+		if !strings.Contains(string(readme), "\n"+want+"\n") {
+			t.Errorf("README.md does not show the regen.sh command on a line of its own:\n%s", want)
+		}
+	}
+	if n == 0 {
+		t.Fatal("assets/regen.sh has no shot lines")
+	}
+}

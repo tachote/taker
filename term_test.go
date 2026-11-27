@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -98,7 +100,6 @@ func TestTermDryRunWritesNothing(t *testing.T) {
 // doneDry promises the preflight checked "everything the image would claim —
 // marks, crops, height", so the crop belongs in a dry-run report too.
 func TestTermDryRunCarriesTheCrop(t *testing.T) {
-	t.Skip("TODO(P9): finishTerminal (like runSnap) sets the crop only after writing the PNG, so a --dry-run report has no crop")
 	_, file := writeTranscript(t, "$ id\nuid=0(root) gid=0(root)\n")
 	_, rep, _ := runJSON(t, func(r *reporter) int {
 		return runTerm(termCmd(TermCmd{File: file, DryRun: true, JSON: true}), r)
@@ -195,5 +196,75 @@ func TestTermMissingFileIsInputError(t *testing.T) {
 	})
 	if code != exitInput || rep.Error == nil || rep.Error.Kind != kindInput {
 		t.Errorf("missing transcript = %d %+v, want an input error", code, rep.Error)
+	}
+}
+
+// A terminal sets tab stops every 8 columns, so a table ls or ps aligned
+// there must stay aligned in the image. Snap's 4 shifted every column.
+func TestTranscriptTabsStopEvery8(t *testing.T) {
+	theme, err := resolveTheme("vscode-dark", "a transcript")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, err := tokenizeTranscript("ab\tc\n12345678\td\n", "", theme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"ab      c", "12345678        d"}
+	for i, l := range lines {
+		var b strings.Builder
+		for _, tok := range l.Tokens {
+			b.WriteString(tok.Text)
+		}
+		if b.String() != want[i] {
+			t.Errorf("line %d = %q, want %q", i+1, b.String(), want[i])
+		}
+	}
+}
+
+// A transcript has no --context or line range, so the height refusal and the
+// tall-image warning must name what does shorten it — and the report must
+// carry a next command, the way exec's output cap does.
+func TestTerminalHeightHintFitsTheMode(t *testing.T) {
+	var long, mid strings.Builder
+	for i := 1; i <= 2000; i++ {
+		fmt.Fprintf(&long, "line %d\n", i)
+		if i <= 300 {
+			fmt.Fprintf(&mid, "line %d\n", i)
+		}
+	}
+	_, file := writeTranscript(t, long.String())
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runTerm(termCmd(TermCmd{File: file, DryRun: true, JSON: true}), r)
+	})
+	if code != exitRefused || rep.Error == nil {
+		t.Fatalf("term of 2000 lines = %d %+v, want a refusal", code, rep.Error)
+	}
+	if strings.Contains(rep.Error.Message, "--context") || !strings.Contains(rep.Error.Message, "trim the transcript") {
+		t.Errorf("error.message = %q, want the transcript hint and no --context", rep.Error.Message)
+	}
+	if !strings.Contains(strings.Join(rep.Help, "\n"), "head -n 200") {
+		t.Errorf("help = %q, want a head -n 200 recipe", rep.Help)
+	}
+
+	_, file = writeTranscript(t, mid.String())
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runTerm(termCmd(TermCmd{File: file, DryRun: true, JSON: true}), r)
+	})
+	if code != exitOK || !hasWarning(rep, "tall") || hasWarning(rep, "--context") {
+		t.Errorf("term of 300 lines = %d, warnings %q: want a tall warning without --context", code, rep.Warnings)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runExec(execCmd(ExecCmd{Shell: "seq 1 2000", DryRun: true}), r)
+	})
+	if code != exitRefused || rep.Error == nil || strings.Contains(rep.Error.Message, "--context") {
+		t.Fatalf("exec seq 1 2000 = %d %+v, want a refusal without --context", code, rep.Error)
+	}
+	if !strings.Contains(strings.Join(rep.Help, "\n"), "taker exec --sh 'seq 1 2000 | head -n 200'") {
+		t.Errorf("help = %q, want the exec --sh head recipe", rep.Help)
 	}
 }

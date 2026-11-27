@@ -1,6 +1,6 @@
 # taker
 
-A CLI tool for generating professional, publication-ready code and HTTP evidence screenshots for security audits, SAST pipelines, MCP servers, and AI agents.
+A CLI tool for generating professional, publication-ready code, HTTP and terminal evidence screenshots for security audits, SAST pipelines, MCP servers, and AI agents.
 
 Produces VS Code Dark+-styled PNG images with syntax highlighting, line numbers, file icons, and red highlight overlays — without requiring a browser, Electron, or any GUI dependency. Single self-contained binary with embedded fonts.
 
@@ -42,7 +42,7 @@ On Windows, compare the `Get-FileHash -Algorithm SHA256 taker_windows_amd64.zip`
 go install github.com/tachote/taker@latest
 ```
 
-Requires Go 1.22+.
+Requires Go 1.26 or newer. An older `go` with the default `GOTOOLCHAIN=auto` downloads the Go 1.26.11 toolchain that `go.mod` names and builds with it.
 
 ### Build from source
 
@@ -68,9 +68,9 @@ go build -o taker .
 - **Word wrap** — wrap long lines with continuation indicators; wraps automatically rather than cropping
 - **HTTP evidence mode** — side-by-side Request / Response pane that mimics Burp Suite's message editor, so evidence reads like a Burp screenshot; also single-panel (`-r` or `-s` alone) and combined captures (`-f`, Burp "Save item" format)
 - **Terminal evidence mode** — `taker exec -- id` runs a command and renders the prompt plus output under a terminal window; `taker term` renders a saved transcript
-- **Provenance built in** — every PNG embeds the command line, timestamp, version and input SHA-256 as `tEXt` chunks; `--json` reports the same fields
+- **Provenance built in** — every PNG embeds the command line, timestamp, version, input SHA-256 and source as text chunks (`tEXt`, or `iTXt` for a value that is not ASCII); `--json` reports the same fields
 - **Preflight for agents** — `--dry-run` validates the whole render and reports the image's dimensions without writing it
-- **Stdin support** — pipe code directly without creating a temp file; if nothing arrives on stdin within 300ms it fails as `usage` instead of hanging on an empty pipe
+- **Stdin support** — pipe code directly without creating a temp file; if nothing arrives on stdin within 300ms it fails as `usage` instead of hanging on an open pipe; a pipe closed with nothing in it fails as `input` (`stdin is empty`)
 - **Self-contained binary** — JetBrains Mono and Symbols Nerd Font are embedded; no runtime dependencies
 
 ---
@@ -85,31 +85,31 @@ taker [file] [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--lang` | `-l` | auto | Language for syntax highlighting |
-| `--lines` | `-n` | all | Lines to include, e.g. `1,5,10-20` |
+| `--lang` | `-l` | auto | Language for syntax highlighting. A name taker does not know is warned, with the lexer used instead |
+| `--lines` | `-n` | all | Lines to include, e.g. `1,5,10-20`. A range past the last line stops at it (`40-999999` means 40 to the end). Ignored, with a warning, when `--context` is set |
 | `--first-line` | | 1 | Line number of the input's first line (use it when piping an excerpt) |
-| `--git` | | — | Render `<rev>:<path>` out of the repository, e.g. `HEAD:src/auth/login.py` |
+| `--git` | | — | Render the file `<rev>:<path>` out of the repository, e.g. `HEAD:src/auth/login.py` — the committed bytes, no textconv; a directory is refused (exit 3), a value without `<rev>:<path>` is a usage error (exit 2) |
 | `--repo-dir` | | `.` | Repository directory for `--git` |
-| `--highlight` | `-H` | — | Regions to highlight in red: `15`, `13,15`, `10-20`, or `15:20-45` for columns |
-| `--mark` | `-m` | — | Highlight every occurrence of this text. Repeatable |
-| `--mark-re` | | — | Highlight every regex match. Repeatable |
+| `--highlight` | `-H` | — | Regions to highlight in red: `15`, `13,15`, `10-20`, or `15:20-45` for columns. Overlapping regions and marks draw as one box |
+| `--mark` | `-m` | — | Highlight every occurrence of this text; a comma is part of it. Repeat `-m` for more |
+| `--mark-re` | | — | Highlight every regex match. Repeatable; a comma splits the value in two (write `\,` to keep it), except inside `{}`, `[]` or `()` |
 | `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal, earliest first |
-| `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable |
-| `--redact-re` | | — | Hide every regex match under a black box. Repeatable |
-| `--redact-keep` | | 0 | Leave the first N characters of each `--redact` match visible (`4` → `sk_l…████`) |
+| `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable; a comma splits the value in two (write `\,` to keep it). The value's parts between `-:=,/.;` and spaces (3 bytes or more) are also hidden where they stand as whole tokens, so a fragment a parser echoed is not left readable |
+| `--redact-re` | | — | Hide every regex match under a black box. Repeatable; commas split as for `--mark-re` |
+| `--redact-keep` | | 0 | Leave the first N characters of each `--redact` match visible (`4` → `sk_l…████`). A run where any match is N characters or shorter is refused (exit 2): that match would be drawn in full |
 | `--label` | `-L` | — | Caption stating what the image proves |
 | `--context` | `-c` | 0 | Include N context lines around each highlighted line |
 | `--wrap` | `-w` | false | Wrap long lines at a column boundary |
 | `--wrap-width` | | 100 | Column width when wrapping (implies `--wrap`; floor 20) |
-| `--title` | `-t` | file path | Title shown in the tab bar |
-| `--theme` | `-T` | `vscode-dark` | Color theme |
+| `--title` | `-t` | file name | Title shown in the tab bar |
+| `--theme` | `-T` | `vscode-dark` | Color theme. `burp` is refused here (exit 2): it is for `taker http` only |
 | `--chrome` | | `editor` | Window style: `editor` (bare pane) or `window` (title bar + traffic lights) |
 | `--shadow` | | false | Drop shadow under the window |
-| `--output` | `-o` | `output.png` | Output PNG path |
+| `--output` | `-o` | `output.png` | Output PNG path. Written atomically (temp file, then rename). A new file gets `0644` under your umask; an overwritten one keeps its mode. A directory that does not exist is a usage error (exit 2), and so is the input file itself, a symlink to it, or another spelling of its path |
 | `--dry-run` | | | Validate and report without writing the PNG |
 | `--list-themes` | | | Print available themes and exit |
 | `--json` | | | Write a machine-readable report to stdout. Human messages stay on stderr |
-| `--toon` | | | Same document in TOON — typically ~25-40% fewer tokens for agents |
+| `--toon` | | | Same document in TOON — typically 25-40% fewer tokens than `--json` |
 
 #### Examples
 
@@ -163,10 +163,12 @@ cat vuln.js | taker -l javascript -t "vuln.js" -H 8 -o evidence.png
 taker secrets.py -H 15 -T dracula -o evidence.png
 ```
 
+The four images below come from the fixtures in [`assets/`](assets/); `assets/regen.sh` runs these exact commands in that directory, so each command, its picture and the picture's embedded provenance agree.
+
 **Highlight + context (VS Code Dark+):**
 
 ```bash
-taker render/render.go -m "maxImageHeight" -c 4 -o evidence.png
+taker auth.py -m "cursor.execute" -c 4 -o example-highlight-context.png
 ```
 
 ![Highlight with context](assets/example-highlight-context.png)
@@ -174,7 +176,7 @@ taker render/render.go -m "maxImageHeight" -c 4 -o evidence.png
 **Dracula theme, two marks found by content:**
 
 ```bash
-taker main.go -m "io.ReadAll" -m "filepath.IsAbs" -c 3 -T dracula -o evidence.png
+taker upload.go -m "io.ReadAll" -m "filepath.Join" -c 3 -T dracula -o example-dracula.png
 ```
 
 ![Dracula theme](assets/example-dracula.png)
@@ -182,7 +184,7 @@ taker main.go -m "io.ReadAll" -m "filepath.IsAbs" -c 3 -T dracula -o evidence.pn
 **Catppuccin Mocha, line selection plus a content mark:**
 
 ```bash
-taker render/theme.go -n "1-32" -m "ChromeBg" -T catppuccin-mocha -o evidence.png
+taker settings.py -n "1-14" -m "DEBUG = True" -T catppuccin-mocha -o example-catppuccin.png
 ```
 
 ![Catppuccin Mocha](assets/example-catppuccin.png)
@@ -199,24 +201,24 @@ Renders a side-by-side Request / Response pane built to look like Burp Suite's m
 |------|-------------|
 | `-r` | File containing the raw HTTP request |
 | `-s` | File containing the raw HTTP response |
-| `-f` | One file holding request **and** response (Burp "Save item"); `-r`/`-s` take precedence |
+| `-f` | One file holding request **and** response (Burp "Save item"). Give either `-f` or `-r`/`-s`, not both (exit 2) |
 | `--hr` | Regions to highlight in the request: `8-9`, or `8:20-45` for columns |
 | `--hs` | Regions to highlight in the response: `4`, or `4:12-60` for columns |
-| `--mark` / `-m` | Highlight every occurrence of this text in either panel. Repeatable |
-| `--mark-re` | Highlight every regex match in either panel. Repeatable |
+| `--mark` / `-m` | Highlight every occurrence of this text in either panel; a comma is part of it. Repeat `-m` for more |
+| `--mark-re` | Highlight every regex match in either panel. Repeatable; commas split as in code evidence |
 | `--max-marks` | Keep at most N matches per `--mark` literal, earliest first |
-| `--redact` | Hide every occurrence of this text under a black box. Repeatable |
+| `--redact` | Hide every occurrence of this text under a black box. Repeatable; commas and parts as in code evidence |
 | `--redact-re` | Hide every regex match under a black box. Repeatable |
-| `--redact-keep` | Leave the first N characters of each `--redact` match visible |
+| `--redact-keep` | Leave the first N characters of each `--redact` match visible; refused (exit 2) when a match is N characters or shorter |
 | `--label` / `-L` | Caption stating what the image proves |
-| `--nr` | Lines to include from the request, e.g. `1-20` |
+| `--nr` | Lines to include from the request, e.g. `1-20`; a range past the end stops at the last line |
 | `--ns` | Lines to include from the response, e.g. `1-30` |
-| `-c` | Include N context lines around each highlighted line |
-| `--wrap-width` | Columns per panel (default: 90) |
-| `-o` | Output PNG path |
+| `-c` | Include N context lines around each highlighted line; in a panel with highlights it overrides `--nr`/`--ns`, with a warning |
+| `--wrap-width` | Columns per panel (default: 90, minimum 20) |
+| `-o` | Output PNG path (default: `output.png`); never one of the input files (exit 2) |
 | `--dry-run` | Validate and report without writing the PNG |
 | `--json` | Machine-readable report on stdout; human messages stay on stderr |
-| `--toon` | Same document in TOON — typically ~25-40% fewer tokens for agents |
+| `--toon` | Same document in TOON — typically 25-40% fewer tokens than `--json` |
 
 There is no `-T` here. HTTP evidence always renders in the Burp palette: a reader recognises a proxy capture at a glance, and a Dracula-tinted pane labelled *Request / Response / Pretty / Raw / Hex* is a screenshot of an application that does not exist.
 
@@ -262,7 +264,7 @@ taker http -r req.http -s res.http \
 **Credential leak — highlighted request line 7, response line 7:**
 
 ```bash
-taker http -r request.http -s response.http --hr 7 --hs 7 -o evidence.png
+taker http -r request.http -s response.http --hr 7 --hs 7 -o example-http.png
 ```
 
 ![HTTP evidence](assets/example-http.png)
@@ -276,6 +278,10 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=client_credentials&client_secret=EXPOSED_SECRET
 ```
 
+An HTTP/2 request copied in pseudo-header form (DevTools, HTTP/2 proxies),
+with no request line, is accepted too: its first line is `:method:`,
+`:path:`, `:authority:` or `:scheme:`.
+
 **Response file format** (`response.http`):
 ```
 HTTP/2 200 OK
@@ -287,32 +293,45 @@ Content-Type: application/json
 ### Terminal evidence
 
 ```
-taker exec -- <command> [args...] [flags]
-taker exec --sh '<pipeline>' [flags]
+taker exec [flags] -- <command> [args...]
+taker exec [flags] --sh '<pipeline>'
 taker term <transcript-file> [flags]
 ```
 
-The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. The exit status lands in the footnote (`exit 0`, `exit 1`, `timed out after Ns`), so a non-zero result is documented, not hidden.
+The canonical evidence of a command-injection finding is the command and its output — `$ id` answering `uid=33(www-data)`. `taker exec` runs the command itself, prepends the `$ prompt` line, and renders the transcript under a terminal title bar (no source-line gutter); `taker term` draws a transcript you already captured. Tabs expand to 8-column stops, as in a terminal, so a `ps` or `ls -l` table keeps its columns.
 
-| Flag | Description |
-|------|-------------|
-| `--sh` | Run the string through `sh -c` instead of exec'ing argv (mutually exclusive with a positional command) |
-| `--timeout` | Kill the command after this many seconds (default: none) |
-| `--lines` / `-n` | Lines of the transcript to include |
-| `--wrap-width` | Terminal width in columns (default: 80) |
-| `-m` / `--mark` / `--mark-re` | Highlight literals / regex matches in the output |
-| `--redact` / `--redact-re` / `--redact-keep` | Mask output the same way as code evidence |
-| `-L` | Caption stating what the image proves |
-| `-T` | Color theme |
-| `-o` | Output PNG path |
-| `--json` | Machine-readable report on stdout |
-| `--toon` | Same document in TOON — typically ~25-40% fewer tokens for agents |
+**Put taker's flags before `--`.** Everything after `--` belongs to the command: `taker exec -- id -o rce.png` runs `id -o rce.png` and writes `output.png` (taker warns). Without `--`, one of exec's own flags inside the command (`taker exec id -o x.png`) is refused (exit 2) instead of guessed at, and an unknown flag in front of the command (`taker exec --bogus`) is a usage error that names it. The command's own flags (`head -n 2`, `grep -v`) are never taken for taker's.
+
+The prompt line is the argv shell-quoted, so it pastes back as the same command (`$ grep -c 'func main' a.go`); `--sh` lines are drawn as typed. The exit status lands in the footnote (`exit 0`, `exit 1`, `killed by SIGSEGV`, `killed after Ns` when `--timeout` stopped it), so a non-zero result is documented, not hidden. The status is the command's own: a background process it leaves holding the output is given 2 more seconds, then killed with the command's process group, and the footnote adds `output cut 2s later`. Output past 10000 lines or 4 MiB cannot render under the 32000px cap, so `taker exec` kills the command and refuses (exit 4) instead of drawing a cut transcript; pipe it through `head`.
+
+**`taker exec`**
+
+| Flag | Short | Default | Description |
+|------|-------|---------|-------------|
+| `--sh` | | — | Run the string through `sh -c` (pipes, redirections, quoting); mutually exclusive with a command after `--` |
+| `--timeout` | | 15 | Kill the command after this many seconds (1 to 9223372036) |
+| `--output` | `-o` | `output.png` | Output PNG path |
+| `--label` | `-L` | — | Caption stating what the image proves |
+| `--mark` | `-m` | — | Highlight every occurrence of this text in the output; a comma is part of it. Repeat `-m` for more |
+| `--mark-re` | | — | Highlight every regex match. Repeatable |
+| `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal |
+| `--redact` / `--redact-re` / `--redact-keep` | | — | Mask the output the same way as code evidence; the masking also covers the prompt line and the recorded command. A needle that shell-quoting would split in the prompt line (one holding both `'` and one of `"`, `$`, a backtick, `\` or `!`) is refused (exit 2); use `--sh`. So is a `--redact-re` that matches a word of the command but not the drawn line `$ <command>`, such as one anchored with `^` or `$`; anchor on `\b` instead |
+| `--wrap-width` | | 80 | Columns per row before output wraps (minimum 20) |
+| `--theme` | `-T` | `vscode-dark` | Color theme (`burp` is refused) |
+| `--title` | `-t` | `Terminal` | Title shown in the window bar |
+| `--chrome` | | `window` | Window style: `window` (title bar, like a terminal) or `editor` |
+| `--shadow` | | false | Drop shadow under the window |
+| `--dry-run` | | | Run the command and validate without writing the PNG |
+| `--json` | | | Machine-readable report on stdout |
+| `--toon` | | | Same document in TOON — typically 25-40% fewer tokens than `--json` |
+
+**`taker term`** takes the same flags except `--sh` and `--timeout`, and its `-o` must not name the transcript (exit 2). Neither mode has `--lines` or `--context`: trim the transcript itself (`head`, `tail`, `sed -n`) before you render it. A transcript too tall to render is refused with that recipe in the report's `help`.
 
 ```bash
 # Run the proof command and keep its output, exit code included
-taker exec -- id -o rce.png
+taker exec -o rce.png -- id
 taker exec --sh 'curl -s http://internal:8080/actuator/env | head' -o ssrf.png
-taker exec --timeout 5 -- nc -nv 10.0.0.9 443 -o port-open.png
+taker exec --timeout 5 -o port-open.png -- nc -nv 10.0.0.9 443
 
 # Render a transcript captured during the test window
 taker term ./loot/nmap-scan.txt -m "open" -o ports.png
@@ -367,36 +386,40 @@ taker --list-themes
 An agent or a pipeline should not have to read the messages a human reads. With
 `--json`, **stdout carries one JSON document** describing the run, while stderr
 keeps the human lines. `--toon` writes the same document in
-[TOON](https://toonformat.dev/) — identical information, typically 25-40% fewer tokens for
-an agent to read:
+[TOON](https://toonformat.dev/) — identical information, typically 25-40% fewer
+tokens than the indented JSON for an agent to read. Both examples below are real
+output from the `assets/` fixtures; only `output` and `version` are
+generalized.
 
 ```console
-$ taker snap src/auth.py -m os.system -c 5 --toon -o auth.png
+$ taker --git HEAD:assets/auth.py -m cursor.execute -c 4 --toon -o auth.png
 ```
 ```
 tool: taker
-version: 0.2.0
+version: 0.3.0
 mode: snap
 ok: true
 exit: 0
-command: "taker snap src/auth.py -m os.system -c 5 --toon -o auth.png"
-generated: "2026-04-12T18:02:11Z"
 output: /abs/path/auth.png
-bytes: 16099
-width: 573
-height: 293
+bytes: 129485
+width: 1597
+height: 964
+command: "taker --git HEAD:assets/auth.py -m cursor.execute -c 4 --toon -o auth.png"
+generated: "2026-11-27T22:25:23Z"
 source:
-  kind: file
-  path: src/auth.py
+  kind: git
+  path: assets/auth.py
+  rev: 45b60c58bb68
 crop:
-  first: 66
-  last: 76
-  shown: 11
-  total: 120
-marks[1]{needle,matches,lines,kept,dropped}:
-  os.system,1,1,1,0
+  first: 32
+  last: 63
+  shown: 15
+  total: 63
 sha256[1]{name,sum}:
-  source,b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
+  source,2866313c2bdc57d2fbb8be45f9bb84fc909c4caf4b64e5ced6bd34fdc83cd7f3
+redactions: 0
+marks[1]{needle,matches,lines,kept,dropped,shown}:
+  cursor.execute,2,2,2,0,2
 warnings[0]:
 ```
 
@@ -407,109 +430,234 @@ passed a format flag still gets something it can classify instead of grepping
 stderr prose.
 
 ```console
-$ taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png
+$ taker auth.py -m cursor.execute --redact-re 'portal-[a-z-]+' -n 10-14,32-40 --json -o auth.png
 ```
 ```json
 {
   "tool": "taker",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "mode": "snap",
   "ok": true,
   "exit": 0,
-  "command": "taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png",
-  "generated": "2026-04-12T18:02:11Z",
   "output": "/abs/path/auth.png",
-  "bytes": 16099,
-  "width": 573,
-  "height": 293,
-  "source": { "kind": "file", "path": "src/auth.py" },
-  "crop": { "first": 70, "last": 71, "shown": 2, "total": null },
-  "marks": [ { "needle": "os.system", "matches": 1, "lines": 1, "kept": 1, "dropped": 0 } ],
-  "sha256": [ { "name": "source", "sha256": "b94d…" } ],
-  "redactions": 0,
-  "dry_run": false,
-  "warnings": []
+  "bytes": 88964,
+  "width": 1421,
+  "height": 915,
+  "command": "taker auth.py -m cursor.execute --redact-re <redacted> -n 10-14,32-40 --json -o auth.png",
+  "generated": "2026-11-27T22:25:36Z",
+  "source": {
+    "kind": "file",
+    "path": "auth.py"
+  },
+  "crop": {
+    "first": 10,
+    "last": 40,
+    "shown": 14,
+    "total": 63
+  },
+  "sha256": [
+    {
+      "name": "source",
+      "sum": "b637103c9df602a7eaf150faaaf0dff42601e52c273b6317806340a658a3621a"
+    }
+  ],
+  "redactions": 1,
+  "marks": [
+    {
+      "needle": "cursor.execute",
+      "matches": 2,
+      "lines": 2,
+      "kept": 2,
+      "dropped": 0,
+      "shown": 1
+    }
+  ],
+  "warnings": [
+    "marked line 62 is not in the \"auth.py\" output"
+  ]
 }
 ```
 
-The report echoes `--mark`/`--mark-re` needles verbatim — they are instructions
-to circle, not secrets — while `--redact` literals are masked everywhere,
-including inside `warnings[]` and `command`. Do not pass a mark you would not
-want recorded.
+Here the second `cursor.execute` (line 62) is outside `--lines`, so `kept` is 2
+but `shown` is 1, and a warning says so. The report echoes `--mark`/`--mark-re`
+needles verbatim — they are instructions to circle, not secrets — while
+`--redact`/`--redact-re` values are masked everywhere, including inside
+`warnings[]`, `command` and an error message (even one raised before the render
+started). Do not pass a mark you would not want recorded.
 
 A run that fails says so in the same document, so a consumer never has to branch
 on "did anything come out of stdout":
 
 ```json
 {
-  "tool": "taker", "version": "0.2.0", "mode": "snap",
-  "ok": false, "exit": 3, "warnings": [],
-  "error": { "kind": "input", "message": "open nope.py: no such file or directory" }
+  "tool": "taker",
+  "version": "0.3.0",
+  "mode": "snap",
+  "ok": false,
+  "exit": 3,
+  "command": "taker nope.py --json -o x.png",
+  "generated": "2026-11-27T22:25:36Z",
+  "redactions": 0,
+  "warnings": [],
+  "error": {
+    "kind": "input",
+    "message": "open nope.py: no such file or directory"
+  }
 }
 ```
 
+### Fields
+
+The keys always come in this order, in JSON and in TOON. A key marked
+*omitted* is left out when it does not apply; it is never `null` or zero.
+
+| Key | Meaning |
+| --- | --- |
+| `tool`, `version`, `mode`, `ok`, `exit` | Always present. `mode` is `snap`, `http`, `exec` or `term`. `exit` is the exit code below |
+| `output`, `bytes`, `width`, `height` | The PNG as written, read back off disk. Omitted on a failure and on `--dry-run` |
+| `command`, `generated` | The invocation and its UTC time |
+| `dry_run` | `true` on `--dry-run`; omitted otherwise |
+| `source` | Where the bytes came from: `kind` (`file`, `git`, `stdin`, `http`, `exec`, `transcript`), `path`, and `rev` — the short commit — for `--git` |
+| `crop` | The extent the image shows (`snap`, `exec`, `term`) |
+| `panels` | `taker http` only: one crop per pane, `request` and `response`. A pane that was not given is omitted |
+| `sha256` | One `{name, sum}` per input: `source`, `request`, `response` or `transcript` |
+| `redactions` | Always present: the black boxes the footnote declares |
+| `marks` | One row per `--mark`/`--mark-re`: `needle`, `matches`, `lines`, `kept`, `dropped`, `shown` |
+| `themes` | `--list-themes --json` only |
+| `exec` | `taker exec` only: the command's `exit`, `timed_out` and `signal` |
+| `warnings` | Always present, possibly empty |
+| `help` | The next command to run; omitted when there is none |
+| `error` | On a failure: `kind` and `message` |
+
 **The fields describe what was written, not what was asked for.** `width`,
 `height` and `bytes` are read back off the PNG. `crop` is the extent the image
-shows, in the source's own numbering, and its `total` is `null` when the input did
-not start at line 1 — an excerpt's real length is not something taker knows, and a
-wrong total is worse than none. `panels` carries one `crop` per pane that exists
-in `taker http` — an absent pane is `null`, not a zero crop. `marks` reports, per
-literal or pattern, how many matches were boxed (`kept`) and how many a limit left
-out (`dropped`). `sha256` fingerprints every input that fed the image (`source`,
-`request`, `response`, `transcript`), and `command`/`generated` record the exact
-invocation and its UTC time — the same provenance the PNG itself embeds as `tEXt`
-chunks (`taker:sha256`, `taker:command`, `taker:generated`, `taker:version`), so an
-image that travels without the report still describes itself — with one
-exception: every `--redact` literal is replaced by `<redacted>` in `command`
-and in the PNG chunks, because a masked value must not leak through
-provenance. `redactions` counts
-the black boxes the footnote declares. For `taker exec`, `exec` carries the
-child command's outcome (`exit`, `timed_out`) — taker's own `exit` says the
-evidence was produced, `exec.exit` says what the command answered. `warnings`
-holds the same caveats the
-terminal shows — a mark that landed outside the view, a redaction that matched
-nothing, a trim that cut the request line — so they survive a consumer that never
-reads stderr. `--dry-run` runs the whole pipeline and reports the same document
-with `dry_run: true` and no `output`, for a preflight that never writes.
-`help` carries the next command that unblocks or completes the run — widen the
-trim, fix the flag, rerun without `--dry-run` — so a consumer never has to
-parse a manual to recover.
+shows, in the source's own numbering (`first`, `last`, `shown` lines, `total`),
+and its `total` is `null` when the input did not start at line 1 — an excerpt's
+real length is not something taker knows, and a wrong total is worse than none.
+`marks` reports, per literal or pattern, over the whole input: how many matches
+`--max-marks` kept (`kept`) and left out (`dropped`), and how many kept matches
+sit on a line the image shows (`shown`) — a `--lines`/`--context`/`--nr`/`--ns`
+trim can leave a kept match out of the view, so assert on `shown`, not `kept`,
+to know a box is in the image. `command` is shell-quoted so it replays, and it
+starts with the binary's base name instead of its path. `version` (and
+`taker --version`) is the release tag for a release build, the module version
+for `go install` or a `go build` in a git clone (a pseudo-version such as
+`0.3.1-0.2026…-54baaba5771c`), `dev+<commit>` when only the commit is known,
+and `dev` when nothing is. For `taker exec`, `exec` carries the child command's
+outcome (`exit`, `timed_out`, and `signal` — `SIGKILL`, `SIGSEGV` — with `exit`
+null when a signal ended it) — taker's own `exit` says the evidence was
+produced, `exec.exit` says what the command answered. `warnings` holds the same
+caveats the terminal shows — a mark that landed outside the view, a redaction
+that matched nothing, a trim that cut the request line — so they survive a
+consumer that never reads stderr. `--dry-run` runs the whole pipeline and
+reports the same document, `crop` and `panels` included, with `dry_run: true`
+and no `output`, for a preflight that never writes. `help` carries the next
+command that unblocks or completes the run — widen the trim, fix the flag,
+rerun without `--dry-run` — so a consumer never has to parse a manual to
+recover.
 
 `--list-themes --json` reports the palettes as data too, with `httpOnly` marking
-the ones `taker snap` refuses.
+the ones `taker snap`, `exec` and `term` refuse.
+
+### PNG metadata
+
+The PNG carries the same provenance as text chunks, so an image that travels
+without the report still describes itself. A value that is plain ASCII is a
+`tEXt` chunk; any other value (an accented caption, a non-ASCII path) is an
+`iTXt` chunk, whose text is UTF-8, because `tEXt` is Latin-1 and would read
+back garbled.
+
+| Key | Value |
+| --- | --- |
+| `taker:version` | Same as the report's `version` |
+| `taker:generated` | Same as `generated` |
+| `taker:command` | Same as `command` |
+| `taker:sha256` | The `source` sum; `taker:sha256:request`, `taker:sha256:response` and `taker:sha256:transcript` for the other inputs |
+| `taker:source` | `<kind>:<path>`, for example `file:auth.py` or `http:request.http`. Absent for stdin and `taker exec` |
+| `taker:git-revision` | The short commit, for `--git` only |
+| `taker:exec` | `taker exec` only: the command line as the prompt shows it |
+
+Every `--redact` literal, its parts and every `--redact-re` match are replaced
+by `<redacted>` in these chunks, as in the report, because a masked value must
+not leak through provenance. The `taker:sha256*` chunks are the one exception:
+they are never scrubbed. Each sum is already computed over masked text, and
+scrubbing it again could only cut holes in the hex (a `--redact-re '[0-9a-f]+'`
+would wipe it) and break its agreement with the report.
+
+### Reproducing a sha256
+
+Each `sha256` covers the input as taker matched and drew it, in every mode, not
+the raw bytes. A hash of the raw bytes would let anyone who holds the image
+confirm guesses at a short secret it hides. To check a sum, apply the same two
+steps:
+
+1. **Normalize.** Strip ANSI escape sequences, compose each letter that is
+   followed by combining marks (NFC on that sequence only, never on a letter
+   NFC would replace, such as U+212A KELVIN SIGN), then remove the BOM,
+   zero-width and other invisible format characters, and the combining marks
+   left over. On a line where composing would move a `--redact`,
+   `--redact-re`, `--mark` or `--mark-re` match (or a `--redact` fragment) off
+   its text, the sequences under that match and the shown segment next to it
+   are not composed; if that is not enough, the whole line is left
+   uncomposed. Those marks are then removed, so an accent there is drawn as
+   its base letter.
+2. **Mask.** Replace with `<redacted>`, longest match first and left to right:
+   every `--redact` literal, its double-quoted form (`"value"`, quotes
+   included), each of its parts between `-:=,/.;` and spaces that is 3 bytes or
+   more (anywhere, even inside a longer word — stricter than the image, which
+   boxes parts only as whole tokens), and every `--redact-re` match.
+
+So `sha256sum <file>` equals the reported sum only for a plain file with
+nothing redacted. For the JSON example above, the regex matches only
+`portal-dev-key`:
+
+```console
+$ sed -E 's/portal-[a-z-]+/<redacted>/g' auth.py | shasum -a 256
+b637103c9df602a7eaf150faaaf0dff42601e52c273b6317806340a658a3621a  -
+```
+
+For `--git` the input is the committed blob (`git cat-file blob <rev>:<path>`),
+and for `taker exec` it is the transcript as drawn, the `$ ` prompt line
+included (`printf '$ echo hi\nhi\n' | shasum -a 256` for `taker exec -- echo hi`).
 
 ### Exit codes
 
 The code is part of the contract: it says what to fix without parsing a word.
 
-| Code | Meaning |
-| --- | --- |
-| `0` | The PNG is on disk |
-| `1` | The evidence could not be written: output path, encoding, disk |
-| `2` | Usage: unknown flag, bad value, a combination that cannot work |
-| `3` | The input cannot be used as given: unreadable, empty, a directory, no such revision |
-| `4` | A documented limit refused the render: past 32000px tall, nothing matched |
+| Code | `error.kind` | Meaning |
+| --- | --- | --- |
+| `0` | — | The PNG is on disk (or, with `--dry-run`, it would have been) |
+| `1` | `output` | The evidence could not be written: encoding, disk, permissions |
+| `2` | `usage` | Usage: unknown flag, bad value, a combination that cannot work, an `-o` that names the input or a directory that does not exist |
+| `3` | `input` | The input cannot be used as given: unreadable, empty, a directory, no such revision, not HTTP |
+| `4` | `refused` | A documented limit refused the render: past 32000px tall, nothing left to show, `taker exec` output past its cap |
 
 Failures are reported on **both** channels: the code, the human line on stderr,
-and a document on stdout carrying `error.kind` (`usage`, `input`, `refused`,
-`output`), the message and any `help` hints — in the requested format with
-`--json`/`--toon`, in TOON without a flag. Parse errors get the same treatment:
-`taker http --bogus` exits 2 with `error.kind: usage` on stdout, not just a
-usage dump on stderr. A failed run never writes an image.
+and a document on stdout carrying `error.kind`, the message and any `help`
+hints — in the requested format with `--json`/`--toon` (`--json=true` counts
+too), in TOON without a flag. Parse errors get the same treatment: `taker http
+--bogus` exits 2 with `mode: http`, `error.kind: usage`, and `help` naming
+`taker http --help` and listing that mode's flags. A failed run never writes an
+image.
 
 ## Behavior
 
 Guards against shipping a screenshot that proves nothing:
 
-- **No matching lines** → error, exit 4 (see Exit codes). `-n 500-600` on a 100-line file will not emit a blank PNG. Same for `--nr` / `--ns`, and for an empty request or response file.
-- **Body too long to look at** → a 3000-line response renders 129 000px tall, past the 32 767px browsers decode. `taker` refuses before allocating (which would cost about a gigabyte) and names the fix; past 8 000px it warns but still renders, because that call is yours.
+- **No matching lines** → error, exit 4 (see Exit codes). `-n 500-600` on a 100-line file will not emit a blank PNG. Same for `--nr` / `--ns`.
+- **Empty input** → error, exit 3. An empty or whitespace-only file, `--git` blob or stdin, request or response, or transcript is refused instead of rendered as a blank pane.
+- **Body too long to look at** → a 3000-line response renders 129 000px tall, past the 32000px cap taker keeps under what browsers decode. `taker` refuses before allocating (which would cost about a gigabyte) and names the fix — `--context` or a line range for code and HTTP, a shorter transcript for `exec` and `term`; past 8000px it warns but still renders, because that call is yours.
 - **Nothing highlighted** → warning on stderr. The image is still written, but you are told the `-H` / `--hr` / `--hs` lines are not in the output.
 - **`-m` matched nothing** → warning naming the literal. Shipping a screenshot whose marker silently missed is the failure this tool exists to prevent.
-- **`-m` matched a lot** → the count, on stderr, every run: `--mark "abc": 25 matches on 25 lines`. A literal that lands on 25 lines paints a ladder of 25 boxes and looks exactly as correct as one that lands on the vulnerable line, so the count is the only thing that tells you which image you are about to publish. `--max-marks N` keeps the first N and reports the ones it left out.
+- **`-m` matched a lot** → the count, on stderr, every run: `--mark "abc": 25 matches on 25 lines; --max-marks keeps a mark visible`. A literal that lands on 25 lines paints a ladder of 25 boxes and looks exactly as correct as one that lands on the vulnerable line, so the count is the only thing that tells you which image you are about to publish. `--max-marks N` keeps the first N and reports the ones it left out.
 - **A trimmed or excerpted view says so, in the image.** `--context`, `--lines` / `--nr` / `--ns` and `--first-line` all narrow the view, and a narrowed view that does not declare itself reads as the whole file: a reader cannot tell a 9-line response from the first 9 lines of a 3000-line one. A muted strip under the panel states it — `lines 4-12 of 87`, `12 of 87 lines` when the kept lines are not contiguous, `lines 59-63 of the excerpt` when the file's length is unknown. The strip is absent when nothing was left out.
 - **Content too wide** → wraps automatically at the widest column that fits and says so, instead of cropping the line. Use `--wrap-width` to pick the width yourself.
-- **A mark that falls outside the view** → warning naming the lines, because an image with one box while the note says two lines are highlighted is worse than an unmarked one. `-H 2,4 -n 1-3` says `marked line 4 is not in the output`; when nothing is in view the older, blunter message fires instead.
+- **A mark that falls outside the view** → warning naming the lines, because an image with one box while the note says two lines are highlighted is worse than an unmarked one. `-H 2,4 -n 1-3` says `marked line 4 is not in the "auth.py" output`; when nothing is in view the older, blunter message fires instead.
 - **Skipped lines** → the gap band states the count (`··· 37 lines skipped`), so a reader can tell how much was left out.
+- **Overlapping highlights** → one box. `-H 1:10-16 -m sk_live` on the same value draws the union, not nested frames that read as two findings. The `marks` counts do not change.
+- **Invisible characters** → before matching, taker strips ANSI escapes, composes each letter that carries combining marks (so a decomposed `José` keeps its accent; other codepoints, such as a KELVIN SIGN homoglyph, are drawn as they are) and removes the BOM, zero-width and other format characters that would split a needle, in files, stdin, HTTP messages and transcripts alike. `--redact` and `--mark` literals get the same treatment, so a needle holding one of those characters still matches; a literal made only of them is refused (exit 2). Each step that changed something is warned (`stripped 2 ANSI escape sequences before matching`, `removed 1 invisible/format characters ...`), and the `sha256` covers the normalized text.
+- **Bytes that are not UTF-8** → drawn as U+FFFD and warned with their count and first line, because the image cannot show their values.
+- **An `-o` that names the input** → refused (exit 2), including a symlink to it or another spelling of its path, instead of overwriting the evidence's own source.
 
 ---
 
@@ -585,11 +733,18 @@ For HTTP mode, `RenderHTTP()` runs two parallel render passes and composites the
 
 Any language supported by [chroma](https://github.com/alecthomas/chroma) — 200+ lexers including Go, Python, JavaScript, TypeScript, Java, Rust, PHP, Ruby, C/C++, C#, YAML, JSON, SQL, Bash, HCL/Terraform, XML, HTML, and HTTP.
 
-Language is auto-detected from the file extension. Override with `--lang`:
+Language is auto-detected from the file extension (for `--git`, from the path in the revision). Override with `--lang`:
 
 ```bash
 taker payload.txt --lang sql -H 3 -o evidence.png
 ```
+
+A `--lang` that names no lexer is not an error, but it is warned, with the
+language used instead (`--lang "pyhton" is not a language taker knows;
+highlighted as plain text instead`). Bytes that are not UTF-8 draw as U+FFFD;
+the run warns with their count and the first line that holds one (for `taker
+http`, only in the start line and headers — the body has its own binary-body
+warning).
 
 ---
 
@@ -608,6 +763,7 @@ Icons are rendered using [Symbols Nerd Font](https://www.nerdfonts.com/) embedde
 | [alecthomas/chroma](https://github.com/alecthomas/chroma) | Syntax highlighting (200+ languages) |
 | [alecthomas/kong](https://github.com/alecthomas/kong) | CLI flag parsing |
 | [golang.org/x/image](https://pkg.go.dev/golang.org/x/image) | Font rendering, image primitives |
+| [golang.org/x/text](https://pkg.go.dev/golang.org/x/text) | NFC composition of input text |
 
 **Embedded assets:**
 - [JetBrains Mono](https://www.jetbrains.com/lp/mono/) — code font (SIL Open Font License 1.1)

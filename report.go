@@ -116,15 +116,19 @@ type Panels struct {
 	Response *Crop `json:"response,omitempty"`
 }
 
-// MarkReport is one --mark literal's outcome. Kept and Dropped are what the
-// image shows versus what a limit left out, so a caller can tell a mark that
-// landed where it wanted from one that only half landed.
+// MarkReport is one --mark literal's outcome, counted over the whole input.
+// Kept and Dropped split the matches by --max-marks: the ones it kept versus
+// the ones it left out. Shown is how many kept matches sit on a line the image
+// shows — a --lines or --context trim can leave a kept match out of the view,
+// and kept=1 with no box in the image is the claim a consumer must not trust.
+// It comes last so a TOON table's existing columns keep their positions.
 type MarkReport struct {
 	Needle  string `json:"needle"`
 	Matches int    `json:"matches"`
 	Lines   int    `json:"lines"`
 	Kept    int    `json:"kept"`
 	Dropped int    `json:"dropped"`
+	Shown   int    `json:"shown"`
 }
 
 // ExecReport records the child command's outcome for `taker exec` — the
@@ -133,6 +137,10 @@ type MarkReport struct {
 type ExecReport struct {
 	Exit     *int `json:"exit"`
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Signal names the signal that ended the command (SIGKILL, SIGSEGV),
+	// where exit is null: a signal is not an exit code, and the -1 Go
+	// reports for it read like one.
+	Signal string `json:"signal,omitempty"`
 }
 
 // ThemeReport is one palette, for --list-themes --json.
@@ -168,9 +176,14 @@ type reporter struct {
 	// name — a token caught by the regex in a filename only stays hidden if
 	// the pattern itself scrubs the strings it touches.
 	secretRes []*regexp.Regexp
+	// argv is the raw command line, when main knows it. Command is rebuilt
+	// from it on every scrub — each word masked before it is quoted — so a
+	// secret that holds a quote cannot hide from the scrub behind the quoting.
+	argv []string
 	// fragOnly holds the needles' separator-split components — for the pixel
 	// redaction, so a needle spliced by quotes or escapes leaves no readable
-	// fragment behind.
+	// fragment behind. The image masks them only as whole tokens (see
+	// redactFragRes).
 	fragOnly []string
 }
 
@@ -377,7 +390,11 @@ func (m *scrubMatcher) matchLen(s string, i int) int {
 // Warnings and help are scrubbed at format time, so they never carry the
 // literal regardless of ordering.
 func (r *reporter) scrubSecrets() {
-	r.rep.Command = r.scrubMeta(r.rep.Command)
+	if r.argv != nil {
+		r.rep.Command = r.commandLine()
+	} else {
+		r.rep.Command = r.scrubMeta(r.rep.Command)
+	}
 	if r.rep.Source != nil {
 		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
 	}
@@ -407,6 +424,95 @@ func (r *reporter) scrubSecrets() {
 func (r *reporter) scrubMeta(v string) string {
 	b, _ := stripANSI([]byte(v))
 	return scrubRedactArgs(r.scrub(string(b)))
+}
+
+// commandLine is the recorded invocation: the program's base name, then each
+// argument masked and shell-quoted. Words joined with bare spaces lost their
+// quoting — `-L "two words"` came back as two arguments — and the record must
+// replay what ran. The base name, not argv[0] as typed: an absolute path to
+// the binary leaks the analyst's filesystem into every image, the same leak
+// the snap title already trims, and it says nothing about what ran.
+func (r *reporter) commandLine() string {
+	if len(r.argv) == 0 {
+		return ""
+	}
+	argv := slices.Clone(r.argv)
+	argv[0] = filepath.Base(argv[0])
+	return r.quoteScrubbed(argv)
+}
+
+// quoteScrubbed masks each word, then quotes it, then masks the line. Word
+// first: quoting escapes a ' or a $, which splits a needle that holds one,
+// and the line-level scrub would no longer see it. The line pass still
+// catches a needle that spans two words.
+func (r *reporter) quoteScrubbed(args []string) string {
+	words := make([]string, len(args))
+	for i, a := range args {
+		b, _ := stripANSI([]byte(a))
+		words[i] = r.scrub(string(b))
+	}
+	for i, w := range words {
+		words[i] = quoteWord(w, true)
+	}
+	return r.scrubMeta(strings.Join(words, " "))
+}
+
+// shellQuote joins argv into one POSIX shell line that splits back into the
+// same words.
+func shellQuote(args []string) string {
+	words := make([]string, len(args))
+	for i, a := range args {
+		words[i] = quoteWord(a, false)
+	}
+	return strings.Join(words, " ")
+}
+
+// quoteWord quotes one word only when it needs it, so a plain command still
+// reads as typed. A word with no ' goes in single quotes, where nothing is
+// special. A word with a ' goes in double quotes, escaping only " $ ` and \:
+// closing the quote around an escaped ' splits a needle such as it's-s3cret
+// in the prompt line, and the image could no longer find it to black it out.
+// A ! forces that form after all, because an interactive bash expands !
+// inside double quotes. With masked set, the <redacted> marker counts as
+// plain: a masked word replays nothing either way, and quoting the marker
+// only adds noise.
+func quoteWord(s string, masked bool) string {
+	if s == "" {
+		return "''"
+	}
+	plain := s
+	if masked {
+		plain = strings.ReplaceAll(s, "<redacted>", "")
+	}
+	if !strings.ContainsFunc(plain, needsQuote) {
+		return s
+	}
+	switch {
+	case !strings.Contains(s, "'"):
+		return "'" + s + "'"
+	case !strings.Contains(s, "!"):
+		var b strings.Builder
+		b.WriteByte('"')
+		for _, c := range s {
+			if strings.ContainsRune("\"$`\\", c) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(c)
+		}
+		b.WriteByte('"')
+		return b.String()
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// needsQuote is any character outside the set a POSIX shell reads literally
+// in a bare word.
+func needsQuote(c rune) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return false
+	}
+	return !strings.ContainsRune("_@%+=:,./-", c)
 }
 
 // pngMeta is the metadata the PNG carries beyond version, time and command:
@@ -570,6 +676,17 @@ func recordMarks(rep *reporter, stats []highlight.MarkStats) {
 	}
 }
 
+// markShown fills marks[].shown once the view is known. recordMarks runs
+// before the trim — --context centers on its matches — so the entries it
+// appended from base on get their shown counts here, in the same order.
+func markShown(rep *reporter, base int, stats []highlight.MarkStats, shown func(i int, st highlight.MarkStats) int) {
+	for i, st := range stats {
+		if base+i < len(rep.rep.Marks) {
+			rep.rep.Marks[base+i].Shown = shown(i, st)
+		}
+	}
+}
+
 // cropOf turns a view's extent into the report's shape. A total of zero means
 // the input was an excerpt, and the field goes out as null rather than as a
 // number nobody measured.
@@ -581,12 +698,44 @@ func cropOf(ext highlight.ViewExtent, total int) Crop {
 	return c
 }
 
-// redactFrags returns the pixel-mask fragments — but only when keep is off:
+// redactFragRes returns the pixel-mask fragments as patterns that match a
+// fragment only where it stands as a whole token — but only when keep is off:
 // --redact-keep shows a span's leading chars, and a kept fragment would show
 // its own. Keep mode is already a weakened guarantee the user asked for.
-func (r *reporter) redactFrags(keep int) []string {
-	if keep > 0 {
+//
+// Whole tokens, because the echo a fragment exists for is bounded by
+// punctuation (strconv reports parsing "ZX9"), while the same letters inside
+// a longer word are ordinary text: "app" from app.example.test blacked out
+// the middle of every "application/json", and evidence that hides what is not
+// secret is not faithful. A fragment glued to other letters by the target
+// ("xZX9y") stays visible; that is the trade this rule makes.
+func (r *reporter) redactFragRes(keep int) []*regexp.Regexp {
+	if keep > 0 || len(r.fragOnly) == 0 {
 		return nil
 	}
-	return r.fragOnly
+	out := make([]*regexp.Regexp, 0, len(r.fragOnly))
+	for _, f := range r.fragOnly {
+		out = append(out, tokenRe(f))
+	}
+	return out
+}
+
+// tokenRe matches s where no word character touches it. The boundary is put
+// only on an edge that is itself an ASCII word character: \b next to "!" or
+// "ñ" would demand a word character outside, and a fragment that starts with
+// punctuation would never match at all. An edge left unbounded only masks
+// more.
+func tokenRe(s string) *regexp.Regexp {
+	pat := regexp.QuoteMeta(s)
+	if isWordByte(s[0]) {
+		pat = `\b` + pat
+	}
+	if isWordByte(s[len(s)-1]) {
+		pat += `\b`
+	}
+	return regexp.MustCompile(pat)
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
 }

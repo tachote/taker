@@ -2,9 +2,11 @@ package render
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image/color"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -181,7 +183,7 @@ func TestHTTPIsAlwaysBurp(t *testing.T) {
 
 var httpConfigFields = []string{
 	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "MarkRe", "MaxMarks",
-	"Redact", "RedactRe", "RedactKeep", "RedactAsked", "Caption",
+	"Redact", "RedactRe", "RedactFrag", "RedactKeep", "RedactAsked", "Caption",
 	"RequestLines", "ResponseLines", "Context", "WrapWidth",
 	// An out-parameter, not a knob: the renderer writes what it drew into it so
 	// the machine-readable report and the image's own footnote cannot disagree.
@@ -619,6 +621,31 @@ func TestHTTPRedact(t *testing.T) {
 	}
 }
 
+// A RedactKeep at least as long as one match would draw that match in full.
+// The renderer refuses with a typed error instead of drawing four boxes and
+// one secret; the old warning fired only when every match was consumed.
+func TestHTTPRedactKeepRefusesAnExposedMatch(t *testing.T) {
+	re := regexp.MustCompile(`sid=[a-z]+|"pass":"[a-z0-9]+"`)
+	_, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RedactRe: []*regexp.Regexp{re}, RedactKeep: 7, // "sid=abc" is 7 chars
+	})
+	var keepErr *RedactKeepError
+	if !errors.As(err, &keepErr) {
+		t.Fatalf("err = %v, want a *RedactKeepError", err)
+	}
+	if keepErr.Keep != 7 || keepErr.Exposed != 1 {
+		t.Errorf("err = %+v, want keep 7 with 1 exposed match", keepErr)
+	}
+	// Under the length of every match, the render goes ahead.
+	if _, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RedactRe: []*regexp.Regexp{re}, RedactKeep: 4,
+	}); err != nil {
+		t.Errorf("keep 4 = %v, want a render", err)
+	}
+}
+
 // extendDown stands in for a second Render with MinHeight. It is only correct
 // while the two produce the same pixels, so pin that.
 func TestExtendDownMatchesMinHeight(t *testing.T) {
@@ -988,5 +1015,28 @@ func TestSinglePaneErrorNamesPanel(t *testing.T) {
 	_, err := RenderHTTP(&HTTPConfig{Response: huge})
 	if err == nil || !strings.HasPrefix(err.Error(), "render Response: ") {
 		t.Errorf("err = %v, want it prefixed with the panel name", err)
+	}
+}
+
+// HTTPLineCount is what the CLI clamps --nr/--hr against before rendering, so
+// it has to name the same last line the renderer numbers.
+func TestHTTPLineCountMatchesTheTokenizer(t *testing.T) {
+	for _, msg := range []string{
+		testReq,
+		testRes,
+		"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+		"GET / HTTP/1.1\nHost: x",
+		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello\n\n",
+		"HTTP/1.1 200 OK\nContent-Type: text/html\n\n<p>a</p>\n   ",
+		"HTTP/1.1 204 No Content\r\r\r",
+		"HTTP/1.1 200 OK\nContent-Type: application/xml\n\n<a>\n<b/>\n</a>",
+	} {
+		lines, _, err := tokenizeHTTP(msg, BurpStyle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := HTTPLineCount(msg), lines[len(lines)-1].LineNum; got != want {
+			t.Errorf("HTTPLineCount(%q) = %d, the renderer numbers %d", msg, got, want)
+		}
 	}
 }
