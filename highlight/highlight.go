@@ -2,6 +2,7 @@ package highlight
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -110,19 +111,26 @@ func FindLiteral(lines []LineTokens, needle string) Marks {
 	if needle == "" {
 		return nil
 	}
-	want := []rune(needle)
+	n := utf8.RuneCountInString(needle)
 	found := Marks{}
 	for _, lt := range lines {
 		if lt.IsGap {
 			continue
 		}
-		text := []rune(lt.Text())
-		for i := 0; i+len(want) <= len(text); i++ {
-			if string(text[i:i+len(want)]) != needle {
-				continue
+		// strings.Index finds the bytes; columns are runes, so the count is
+		// carried from one match to the next instead of converting the line
+		// and comparing a fresh string at every position.
+		text := lt.Text()
+		off, col := 0, 0
+		for {
+			j := strings.Index(text[off:], needle)
+			if j < 0 {
+				break
 			}
-			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: i + 1, End: i + len(want)})
-			i += len(want) - 1
+			col += utf8.RuneCountInString(text[off : off+j])
+			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: col + 1, End: col + n})
+			col += n
+			off += j + len(needle)
 		}
 	}
 	if len(found) == 0 {

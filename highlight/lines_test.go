@@ -463,3 +463,34 @@ func TestLineSpecErrors(t *testing.T) {
 		}
 	}
 }
+
+// Matches after multi-byte runes and back to back: the column count is carried
+// from one match to the next, so a byte offset leaking into it would show here.
+func TestFindLiteralMultibyte(t *testing.T) {
+	lines := []LineTokens{{LineNum: 1, Tokens: []Token{{Text: "ñ=ab → abab ✓ab"}}}}
+	got := FindLiteral(lines, "ab")
+	want := Marks{1: {{Start: 3, End: 4}, {Start: 8, End: 9}, {Start: 10, End: 11}, {Start: 14, End: 15}}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// A multi-byte needle counts its own length in runes too.
+	if got := FindLiteral(lines, "→ a"); !reflect.DeepEqual(got, Marks{1: {{Start: 6, End: 8}}}) {
+		t.Errorf("multi-byte needle: got %v", got)
+	}
+	// Non-overlapping, as before: "aaa" holds one "aa", not two.
+	aaa := []LineTokens{{LineNum: 1, Tokens: []Token{{Text: "aaa"}}}}
+	if got := FindLiteral(aaa, "aa"); !reflect.DeepEqual(got, Marks{1: {{Start: 1, End: 2}}}) {
+		t.Errorf("overlap: got %v", got)
+	}
+}
+
+func BenchmarkFindLiteral(b *testing.B) {
+	lines := make([]LineTokens, 20000)
+	for i := range lines {
+		lines[i] = LineTokens{LineNum: i + 1, Tokens: []Token{{Text: strings.Repeat("señor=value; ", 8) + "token=sk_live_ABC"}}}
+	}
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		FindLiteral(lines, "sk_live_ABC")
+	}
+}
