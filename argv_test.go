@@ -137,13 +137,30 @@ func TestCompileRegexCommaRejoin(t *testing.T) {
 // pattern. unbalancedRE counts it anyway, so the next --redact-re is glued on
 // with a comma and neither pattern matches what it was given for.
 func TestCompileRegexKeepsClassBracketPatternsApart(t *testing.T) {
-	t.Skip("TODO(P9): unbalancedRE counts brackets inside a character class, so `--redact-re '=[^)]+' --redact-re 'sekrit[0-9]+'` fuses into one pattern and redacts nothing")
-	res, err := compileRegex("--redact-re", []string{`=[^)]+`, `sekrit[0-9]+`})
+	for _, in := range [][]string{
+		{`=[^)]+`, `sekrit[0-9]+`},
+		{`[(]tok`, `sekrit[0-9]+`},
+		{`x[{]`, `sekrit[0-9]+`},
+		{`[]a]+`, `sekrit[0-9]+`},
+		{`[^]a]+`, `sekrit[0-9]+`},
+		{`[[:alpha:]]+`, `sekrit[0-9]+`},
+		{`[\]]+`, `sekrit[0-9]+`},
+	} {
+		res, err := compileRegex("--redact-re", in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 2 {
+			t.Errorf("compileRegex(%q): got %d patterns %v, want the two that were given", in, len(res), res)
+		}
+	}
+	// A class kong cut in half is still rejoined.
+	res, err := compileRegex("--redact-re", []string{`[a`, `)]+`})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 2 {
-		t.Fatalf("got %d patterns %v, want the two that were given", len(res), res)
+	if len(res) != 1 || res[0].String() != `[a,)]+` {
+		t.Errorf("split class with a bracket member = %v, want [a,)]+", res)
 	}
 }
 

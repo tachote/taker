@@ -841,27 +841,51 @@ func compileRegex(flag string, patterns []string) ([]*regexp.Regexp, error) {
 }
 
 // unbalancedRE reports p as a fragment of a split pattern: an opener rune
-// without its closer means kong's comma-split cut it in half.
+// without its closer means kong's comma-split cut it in half. Inside a
+// character class a bracket is a member, not an opener: `=[^)]+` is a whole
+// pattern, and counting its ')' glued the next --redact-re onto it, so the
+// fused pattern matched neither secret and both rendered in clear. A class
+// left open at the end ("[a" from "[a,b]") is the split it looks like.
 func unbalancedRE(p string) bool {
 	depth := 0
-	esc := false
-	for _, r := range p {
-		if esc {
-			esc = false
+	inClass := false
+	for i := 0; i < len(p); i++ {
+		// Every metacharacter is ASCII, and no byte of a multi-byte UTF-8
+		// rune is, so walking bytes cannot mistake a rune for syntax.
+		c := p[i]
+		if c == '\\' {
+			i++ // the escaped byte is a literal
 			continue
 		}
-		if r == '\\' {
-			esc = true
+		if inClass {
+			switch {
+			case c == '[' && i+1 < len(p) && p[i+1] == ':':
+				// A POSIX class "[:alpha:]" nests inside the brackets.
+				if j := strings.Index(p[i+2:], ":]"); j >= 0 {
+					i += j + 3
+				}
+			case c == ']':
+				inClass = false
+			}
 			continue
 		}
-		switch r {
-		case '(', '{', '[':
+		switch c {
+		case '[':
+			inClass = true
+			// "[]a]" and "[^]a]": a ']' first in the class is a member.
+			if i+1 < len(p) && p[i+1] == '^' {
+				i++
+			}
+			if i+1 < len(p) && p[i+1] == ']' {
+				i++
+			}
+		case '(', '{':
 			depth++
-		case ')', '}', ']':
+		case ')', '}':
 			depth--
 		}
 	}
-	return depth != 0
+	return depth != 0 || inClass
 }
 
 // promptRGB is the classic shell-prompt green on the "$ " prefix.
