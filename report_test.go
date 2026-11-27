@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"io"
 	"os"
 	"os/exec"
@@ -401,13 +402,7 @@ func TestReportCarriesProvenanceAndRedactions(t *testing.T) {
 	}
 	// The PNG embeds the same data: the image is self-describing when it
 	// travels without the report.
-	png, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(png, []byte("taker:sha256")) {
-		t.Error("PNG does not carry the input hash as a tEXt chunk")
-	}
+	assertPNGAgreesWithReport(t, out, rep)
 }
 
 // `taker exec` runs the command and the report says so — source.kind, the
@@ -954,5 +949,154 @@ func TestPNGCarriesSourceAndRevision(t *testing.T) {
 	}
 	if _, ok := meta["taker:git-revision"]; ok {
 		t.Error("a plain file claims a git revision")
+	}
+}
+
+// assertPNGAgreesWithReport checks the contract between the two channels:
+// every taker:sha256[:name] chunk in the image equals the report's entry for
+// that input, and the image carries no hash the report does not. A test that
+// only looked for the bytes "taker:sha256" let a wiped sum pass.
+func assertPNGAgreesWithReport(t *testing.T, pngPath string, rep Report) {
+	t.Helper()
+	data, err := os.ReadFile(pngPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := pngTextChunks(t, data)
+	want := map[string]string{}
+	for _, h := range rep.SHA256 {
+		key := "taker:sha256"
+		if h.Name != "source" {
+			key += ":" + h.Name
+		}
+		want[key] = h.Sum
+	}
+	if len(want) == 0 {
+		t.Fatal("the report carries no input hash")
+	}
+	for key, sum := range want {
+		if meta[key] != sum {
+			t.Errorf("PNG %s = %q, report says %q", key, meta[key], sum)
+		}
+	}
+	for key := range meta {
+		if strings.HasPrefix(key, "taker:sha256") && want[key] == "" {
+			t.Errorf("PNG carries %s, which the report does not", key)
+		}
+	}
+	if meta["taker:version"] != rep.Version || meta["taker:generated"] != rep.Generated {
+		t.Errorf("PNG version/generated = %q/%q, report %q/%q",
+			meta["taker:version"], meta["taker:generated"], rep.Version, rep.Generated)
+	}
+}
+
+// The PNG and the report agree in every mode, with and without a pattern
+// that matches hex — the shape every hash has.
+func TestPNGAndReportAgreeInEveryMode(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code := write("k.py", "api_key = \"9e107d9d372bb6826bd81d3542a419d6\"\n")
+	req := write("req.http", "GET /x HTTP/1.1\nHost: a\nX-Key: 9e107d9d372bb6826bd81d3542a419d6\n\n")
+	res := write("res.http", "HTTP/1.1 200 OK\n\n{\"ok\":true}\n")
+
+	for _, re := range [][]string{nil, {`[0-9a-f]{32}`, `[0-9a-f]{8,}`}} {
+		name := "plain"
+		if re != nil {
+			name = "redact-re"
+		}
+		runs := map[string]func(r *reporter, out string) int{
+			"snap": func(r *reporter, out string) int {
+				return runSnap(snapCmd(SnapCmd{File: code, Output: out, RedactRe: re, JSON: true}), r)
+			},
+			"http": func(r *reporter, out string) int {
+				return runHTTP(&HTTPCmd{Request: req, Response: res, Output: out, RedactRe: re, JSON: true}, r)
+			},
+			"exec": func(r *reporter, out string) int {
+				return runExec(&ExecCmd{
+					Args: []string{"echo", "9e107d9d372bb6826bd81d3542a419d6"}, Output: out, Timeout: 5,
+					RedactRe: re, Theme: "vscode-dark", Chrome: "window", WrapWidth: 80, JSON: true,
+				}, r)
+			},
+		}
+		for mode, run := range runs {
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				out := filepath.Join(dir, mode+"-"+name+".png")
+				code, rep, _ := runJSON(t, func(r *reporter) int { return run(r, out) })
+				if code != exitOK {
+					t.Fatalf("run = %d, error %+v", code, rep.Error)
+				}
+				assertPNGAgreesWithReport(t, out, rep)
+			})
+		}
+	}
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite testdata/report.golden.* from the current output")
+
+// The report's field order is a contract (toon.go says so): a consumer that
+// reads TOON tables or diffs JSON depends on it, and the README drifted from
+// it once already. This pins one realistic run byte for byte in both
+// encodings. Values that legitimately vary — the temp dir, the PNG's size and
+// dimensions, which follow the renderer — are normalized out; run
+// `go test -run TestReportGolden -update` after a deliberate schema change.
+func TestReportGolden(t *testing.T) {
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	// The report's output path is absolute, joined onto the working directory
+	// as the OS reports it (/private/var for /var on macOS) — normalize that.
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := "def login(user):\n    key = \"sekret-token\"\n    return db.query(user)\n"
+	if err := os.WriteFile("auth.py", []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	volatile := regexp.MustCompile(`(?m)("?(?:bytes|width|height)"?: )\d+`)
+
+	for _, format := range []string{"json", "toon"} {
+		os.Remove("out.png") // each run writes fresh, without an overwrite warning
+		rep := newReporter(format, "snap")
+		var out bytes.Buffer
+		rep.out = &out
+		rep.rep.Version = "golden"
+		rep.rep.Generated = "2026-01-01T00:00:00Z"
+		rep.rep.Command = "taker snap auth.py -o out.png -m db.query -m nowhere --redact sekret-token --" + format
+		captureStderr(t, func() {
+			runSnap(snapCmd(SnapCmd{
+				File: "auth.py", Output: "out.png", Context: 1,
+				Mark: []string{"db.query", "nowhere"}, Redact: []string{"sekret-token"},
+			}), rep)
+		})
+		got := strings.ReplaceAll(out.String(), root, "$DIR")
+		got = volatile.ReplaceAllString(got, "${1}0")
+
+		golden := filepath.Join(wd, "testdata", "report.golden."+format)
+		if *updateGolden {
+			if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatalf("%v (run with -update to create it)", err)
+		}
+		if got != string(want) {
+			t.Errorf("%s report drifted from %s:\n--- got\n%s\n--- want\n%s", format, golden, got, want)
+		}
 	}
 }
