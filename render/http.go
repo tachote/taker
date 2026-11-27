@@ -7,6 +7,7 @@ import (
 	"image/draw"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/lexers"
@@ -136,6 +137,7 @@ type httpLayout struct {
 	status      int    // first line of the final header block: the start line the image must show
 	body        int    // first body line; the line count when the message has no body
 	contentType string // the final block's Content-Type, lowercased, parameters kept
+	encoding    string // the final block's Content-Encoding, lowercased
 }
 
 // interimStatusRe matches the status lines that announce another response
@@ -162,8 +164,19 @@ func layoutHTTP(lines []string) httpLayout {
 				sep = i
 				break
 			}
-			if name, value, ok := splitHeader(lines[i]); ok && l.contentType == "" && isContentTypeHeader(name) {
-				l.contentType = strings.ToLower(strings.TrimSpace(value))
+			name, value, ok := splitHeader(lines[i])
+			if !ok {
+				continue
+			}
+			switch v := strings.ToLower(strings.TrimSpace(value)); headerKey(name) {
+			case "content-type":
+				if l.contentType == "" {
+					l.contentType = v
+				}
+			case "content-encoding":
+				if l.encoding == "" {
+					l.encoding = v
+				}
 			}
 		}
 		if sep < 0 {
@@ -189,12 +202,9 @@ func layoutHTTP(lines []string) httpLayout {
 // rejects one line before it — an HTTP/2 pseudo header, a WebDAV verb, a header
 // with an empty value — and the repainted headers hide that it happened.
 func tokenizeHTTP(msg string, style *chroma.Style) ([]highlight.LineTokens, httpLayout, error) {
-	// chroma turns CRLF and a lone CR into LF before it lexes. Doing it here
-	// first makes this split land on the same lines Tokenize numbers.
-	msg = strings.ReplaceAll(msg, "\r\n", "\n")
-	msg = strings.ReplaceAll(msg, "\r", "\n")
-	raw := strings.Split(msg, "\n")
+	raw := messageLines(msg)
 	layout := layoutHTTP(raw)
+	msg = strings.Join(raw, "\n")
 
 	body := strings.Join(raw[layout.body:], "\n")
 	if body == "" {
@@ -220,6 +230,37 @@ func tokenizeHTTP(msg string, style *chroma.Style) ([]highlight.LineTokens, http
 	return append(lines, bodyLines...), layout, nil
 }
 
+// messageLines splits a message on the lines Tokenize numbers: chroma turns
+// CRLF and a lone CR into LF before it lexes.
+func messageLines(msg string) []string {
+	msg = strings.ReplaceAll(msg, "\r\n", "\n")
+	return strings.Split(strings.ReplaceAll(msg, "\r", "\n"), "\n")
+}
+
+// warnUnreadableBody says when a body's pixels are not its content. A capture
+// saved without decoding draws as rows of replacement glyphs, which reads as
+// "the server sent garbage" instead of "these are the wire bytes". The image
+// stays as it is — it is faithful to the capture — and the warning says what
+// it shows. The CLI's input normaliser re-encodes invalid UTF-8 as U+FFFD, so
+// that rune counts as binary too.
+func (cfg *HTTPConfig) warnUnreadableBody(side, msg string, layout httpLayout) {
+	body := strings.Join(messageLines(msg)[layout.body:], "\n")
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	for _, coding := range strings.Split(layout.encoding, ",") {
+		switch strings.TrimSpace(coding) {
+		case "gzip", "x-gzip", "br", "deflate", "zstd", "compress", "x-compress":
+			cfg.warnf("the %s body is compressed (Content-Encoding: %s); the image shows the compressed bytes, not the content — decode it before rendering (curl --compressed)",
+				side, layout.encoding)
+			return
+		}
+	}
+	if !utf8.ValidString(body) || strings.ContainsAny(body, "\x00\ufffd") {
+		cfg.warnf("the %s body is binary (invalid UTF-8, NUL or U+FFFD); the image shows replacement glyphs, not the content", side)
+	}
+}
+
 // bodyLexer names the lexer for a declared Content-Type, with the fallback
 // chroma's own http lexer uses: a structured suffix ("application/problem+json")
 // is read as its base type when the full type has no lexer of its own.
@@ -238,10 +279,10 @@ func bodyLexer(contentType string) string {
 	return lx.Config().Name
 }
 
-// isContentTypeHeader names the one header whose value decides how the body is
-// painted.
-func isContentTypeHeader(name string) bool {
-	return strings.EqualFold(strings.Trim(strings.TrimSpace(name), ":"), "content-type")
+// headerKey is a header name as it compares: lowercased, without the colon
+// splitHeader leaves on it.
+func headerKey(name string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(name), ":"))
 }
 
 // isStartLine reports a request line ("GET /x HTTP/1.1") or a status line
@@ -494,14 +535,15 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	}
 
 	var reqLines, resLines []highlight.LineTokens
-	var resLayout httpLayout
+	var reqLayout, resLayout httpLayout
 	var err error
 	if hasReq {
-		reqLines, _, err = tokenizeHTTP(cfg.Request, theme.Chroma)
+		reqLines, reqLayout, err = tokenizeHTTP(cfg.Request, theme.Chroma)
 		if err != nil {
 			return nil, fmt.Errorf("tokenize request: %w", err)
 		}
 		reqLines = burpColourMessage(reqLines)
+		cfg.warnUnreadableBody("request", cfg.Request, reqLayout)
 	}
 	if hasRes {
 		resLines, resLayout, err = tokenizeHTTP(cfg.Response, theme.Chroma)
@@ -509,6 +551,7 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			return nil, fmt.Errorf("tokenize response: %w", err)
 		}
 		resLines = burpColourMessage(resLines)
+		cfg.warnUnreadableBody("response", cfg.Response, resLayout)
 	}
 
 	// Literals are located in the full capture, before any trimming: --context

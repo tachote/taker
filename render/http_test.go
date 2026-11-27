@@ -852,3 +852,48 @@ func TestLooksFormEncoded(t *testing.T) {
 		}
 	}
 }
+
+// A capture saved without decoding draws as rows of replacement glyphs, which
+// reads as "the server sent garbage" rather than "the analyst kept the wire
+// bytes". The image stays faithful; the warning says what it shows.
+func TestUnreadableBodyWarns(t *testing.T) {
+	warnings := func(cfg *HTTPConfig) []string {
+		var warned []string
+		cfg.Warn = func(m string) { warned = append(warned, m) }
+		if _, err := RenderHTTP(cfg); err != nil {
+			t.Fatal(err)
+		}
+		return warned
+	}
+	has := func(ws []string, s string) bool {
+		for _, w := range ws {
+			if strings.Contains(w, s) {
+				return true
+			}
+		}
+		return false
+	}
+	gz := "HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Encoding: gzip\n\n\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xab\xae\x05\x00\x43\xbf\xa6\xa3\x02\x00\x00\x00"
+	if w := warnings(&HTTPConfig{Request: testReq, Response: gz}); !has(w, "response body is compressed (Content-Encoding: gzip)") {
+		t.Errorf("no gzip warning in %v", w)
+	}
+	// An already-replaced capture (the CLI's input normaliser re-encodes
+	// invalid bytes as U+FFFD) is the same evidence problem.
+	bin := "HTTP/1.1 200 OK\nContent-Type: application/octet-stream\n\nPK\x03\x04\x00\x00��"
+	if w := warnings(&HTTPConfig{Response: bin}); !has(w, "response body is binary") {
+		t.Errorf("no binary warning in %v", w)
+	}
+	reqBin := "POST /up HTTP/1.1\nHost: a\n\n\xff\xfe\x00raw"
+	if w := warnings(&HTTPConfig{Request: reqBin}); !has(w, "request body is binary") {
+		t.Errorf("no request binary warning in %v", w)
+	}
+	// A declared encoding on a header-only response, and a plain text body,
+	// are not warned about.
+	empty := "HTTP/1.1 304 Not Modified\nContent-Encoding: gzip\n\n"
+	if w := warnings(&HTTPConfig{Request: testReq, Response: empty}); has(w, "body is") {
+		t.Errorf("warned about an empty body: %v", w)
+	}
+	if w := warnings(&HTTPConfig{Request: testReq, Response: testRes}); has(w, "body is") {
+		t.Errorf("warned about a text body: %v", w)
+	}
+}
