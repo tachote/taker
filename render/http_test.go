@@ -896,6 +896,21 @@ func TestUnreadableBodyWarns(t *testing.T) {
 	if w := warnings(&HTTPConfig{Request: testReq, Response: testRes}); has(w, "body is") {
 		t.Errorf("warned about a text body: %v", w)
 	}
+	// curl -i --compressed, DevTools copies and proxy exports keep the
+	// Content-Encoding header but carry the decoded body. The image shows the
+	// content, so saying it shows compressed bytes would be false.
+	for _, enc := range []string{"gzip", "br", "deflate", "zstd", "gzip, br"} {
+		decoded := "HTTP/2 200\ncontent-type: application/json\ncontent-encoding: " + enc + "\nvary: accept-encoding\n\n" + `{"user":"admin","role":"owner"}`
+		if w := warnings(&HTTPConfig{Request: testReq, Response: decoded}); has(w, "body is") {
+			t.Errorf("warned about a decoded body under Content-Encoding: %s: %v", enc, w)
+		}
+	}
+	// A compressed header over bytes the normaliser already replaced still
+	// gets the compressed message, not the generic binary one.
+	replaced := "HTTP/1.1 200 OK\nContent-Encoding: br\n\n\ufffd\ufffdx"
+	if w := warnings(&HTTPConfig{Request: testReq, Response: replaced}); !has(w, "response body is compressed (Content-Encoding: br)") {
+		t.Errorf("no br warning for replaced bytes in %v", w)
+	}
 }
 
 // Burp enables Render from the declared Content-Type. A JSON API that returns

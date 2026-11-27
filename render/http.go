@@ -243,10 +243,21 @@ func messageLines(msg string) []string {
 // "the server sent garbage" instead of "these are the wire bytes". The image
 // stays as it is — it is faithful to the capture — and the warning says what
 // it shows. The CLI's input normaliser re-encodes invalid UTF-8 as U+FFFD, so
-// that rune counts as binary too.
+// that rune counts as binary too. A compressed Content-Encoding only changes
+// the message for a body that is unreadable; it never warns on its own.
 func (cfg *HTTPConfig) warnUnreadableBody(side, msg string, layout httpLayout) {
 	body := strings.Join(messageLines(msg)[layout.body:], "\n")
 	if strings.TrimSpace(body) == "" {
+		return
+	}
+	// The header alone does not say the body is still compressed: curl
+	// --compressed, DevTools copies and most proxy exports keep
+	// Content-Encoding but carry the decoded body. Warning on the header would
+	// call faithful evidence unreadable, so the bytes decide whether to warn
+	// and the header only picks the message. Every listed coding's output fails
+	// this check in practice (gzip's 0x8b, zlib's 0x9c, zstd's 0xb5 and LZW's
+	// 0x9d are not UTF-8 lead bytes).
+	if utf8.ValidString(body) && !strings.ContainsAny(body, "\x00\ufffd") {
 		return
 	}
 	for _, coding := range strings.Split(layout.encoding, ",") {
@@ -257,9 +268,7 @@ func (cfg *HTTPConfig) warnUnreadableBody(side, msg string, layout httpLayout) {
 			return
 		}
 	}
-	if !utf8.ValidString(body) || strings.ContainsAny(body, "\x00\ufffd") {
-		cfg.warnf("the %s body is binary (invalid UTF-8, NUL or U+FFFD); the image shows replacement glyphs, not the content", side)
-	}
+	cfg.warnf("the %s body is binary (invalid UTF-8, NUL or U+FFFD); the image shows replacement glyphs, not the content", side)
 }
 
 // mediaType is a Content-Type value without its parameters.
