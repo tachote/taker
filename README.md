@@ -602,6 +602,13 @@ Language is auto-detected from the file extension. Override with `--lang`:
 taker payload.txt --lang sql -H 3 -o evidence.png
 ```
 
+A `--lang` that names no lexer is not an error, but it is warned, with the
+language used instead (`--lang "pyhton" is not a language taker knows;
+highlighted as plain text instead`). Bytes that are not UTF-8 draw as U+FFFD;
+the run warns with their count and the first line that holds one (for `taker
+http`, only in the start line and headers — the body has its own binary-body
+warning).
+
 ---
 
 ## File type icons

@@ -342,13 +342,9 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "give either a file or --git, not both")
 	case cmd.Git != "":
 		src, origin, err = readGitBlobIn(cmd.RepoDir, cmd.Git)
-		if err == nil {
-			src = normalizeInput(src, rep)
-		}
 	case cmd.File != "":
 		src, err = os.ReadFile(cmd.File)
 		origin = sourceInfo{Kind: "file", Path: cmd.File}
-		src = normalizeInput(src, rep)
 	default:
 		// Not /dev/stdin: that path does not exist on Windows. An agent that
 		// forgot the file hands us an open pipe nobody will write to — probe
@@ -359,12 +355,6 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 			return rep.fail(exitUsage, kindUsage, "no input: stdin produced no data within 300ms")
 		}
 		src, err = io.ReadAll(r)
-		// Piped bytes get the file path's treatment: a needle spliced by an
-		// ANSI escape would otherwise stay legible while "matched nothing"
-		// warned, and the hash would cover bytes the image does not show.
-		if err == nil {
-			src = normalizeInput(src, rep)
-		}
 	}
 	if errors.Is(err, errGitUsage) {
 		rep.helpf("taker snap --git HEAD:path/to/file.py -o out.png")
@@ -373,6 +363,17 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitInput, kindInput, "%v", err)
 	}
+	// Counted on the raw bytes: the normaliser re-encodes them as U+FFFD,
+	// after which nothing can tell them from a real replacement character.
+	inputName := "stdin"
+	if origin.Path != "" {
+		inputName = origin.Path
+	}
+	warnInvalidUTF8(rep, inputName, src, max(cmd.FirstLine, 1)-1)
+	// Every source gets the same treatment, piped bytes included: a needle
+	// spliced by an ANSI escape would otherwise stay legible while "matched
+	// nothing" warned, and the hash would cover bytes the image does not show.
+	src = normalizeInput(src, rep)
 	if origin.Ref != "" {
 		rep.note("%s", origin.Ref)
 	}
@@ -399,7 +400,19 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "--first-line must be 1 or more")
 	}
 
-	all, err := highlight.Tokenize(string(src), cmd.Lang, lexFilename(cmd.File, origin), theme.Chroma)
+	lexName := lexFilename(cmd.File, origin)
+	// Tokenize treats an unknown --lang as absent, so a typo ("pyhton")
+	// silently became whatever the name or content suggested — often plain
+	// text — and the image looked like the tool could not highlight it.
+	if cmd.Lang != "" && !highlight.KnownLang(cmd.Lang) {
+		used := highlight.LexerName(string(src), cmd.Lang, lexName)
+		if used == "fallback" { // chroma's name for its no-lexer lexer
+			used = "plain text"
+		}
+		rep.warn("--lang %q is not a language taker knows; highlighted as %s instead", cmd.Lang, used)
+		rep.helpf("use a lexer name or alias such as python, go, javascript, java, php")
+	}
+	all, err := highlight.Tokenize(string(src), cmd.Lang, lexName, theme.Chroma)
 	if err != nil {
 		return rep.fail(exitInput, kindInput, "tokenize: %v", err)
 	}
@@ -579,6 +592,9 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		if raw, err = os.ReadFile(cmd.File); err != nil {
 			return rep.fail(exitInput, kindInput, "read %s: %v", cmd.File, err)
 		}
+		rawReq, rawRes := splitCapture(raw)
+		warnHTTPHeadUTF8(rep, "request", rawReq)
+		warnHTTPHeadUTF8(rep, "response", rawRes)
 		raw = normalizeInput(raw, rep)
 		reqSrc, resSrc = splitCapture(raw)
 		srcPath = cmd.File
@@ -599,6 +615,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	default:
 		if cmd.Request != "" {
 			if reqSrc, err = os.ReadFile(cmd.Request); err == nil {
+				warnHTTPHeadUTF8(rep, "request", reqSrc)
 				reqSrc = normalizeInput(reqSrc, rep)
 			} else {
 				return rep.fail(exitInput, kindInput, "read request: %v", err)
@@ -606,6 +623,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		}
 		if cmd.Response != "" {
 			if resSrc, err = os.ReadFile(cmd.Response); err == nil {
+				warnHTTPHeadUTF8(rep, "response", resSrc)
 				resSrc = normalizeInput(resSrc, rep)
 			} else {
 				return rep.fail(exitInput, kindInput, "read response: %v", err)
@@ -967,6 +985,35 @@ func normalizeInput(b []byte, rep *reporter) []byte {
 		rep.warn("removed %d invisible/format characters (BOM, ZWSP, combining marks with no precomposed form) so the needle stays contiguous", m)
 	}
 	return out
+}
+
+// warnInvalidUTF8 says when bytes of the input are not UTF-8. Each one is
+// drawn as U+FFFD, which has a glyph, so nothing in the image shows that a
+// value was lost — and a needle holding those bytes can never match. offset
+// shifts the line into the numbering the analyst reads (--first-line, the
+// prompt line of a transcript).
+func warnInvalidUTF8(rep *reporter, name string, raw []byte, offset int) {
+	n, line := highlight.InvalidUTF8(string(raw))
+	if n == 0 {
+		return
+	}
+	rep.warn("%d invalid UTF-8 byte(s) in %s (first on line %d) render as U+FFFD; the image cannot show their values",
+		n, name, line+offset)
+}
+
+// warnHTTPHeadUTF8 is warnInvalidUTF8 for the start line and headers of one
+// HTTP message, counted on the raw bytes. The body is left out: the renderer
+// already says when a body is binary or compressed, and a second warning
+// about the same bytes would only repeat it.
+func warnHTTPHeadUTF8(rep *reporter, side string, raw []byte) {
+	head := raw
+	if i := bytes.Index(raw, []byte("\n\n")); i >= 0 {
+		head = raw[:i]
+	}
+	if i := bytes.Index(head, []byte("\n\r\n")); i >= 0 {
+		head = head[:i]
+	}
+	warnInvalidUTF8(rep, "the "+side+"'s start line or headers", head, 0)
 }
 
 // normalizeZeroWidth DELETES codepoints that carry no standalone glyph —
@@ -1649,6 +1696,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	out := run.out
 
 	transcript := "$ " + cmdStr + "\n" + string(out)
+	warnInvalidUTF8(rep, "the transcript", []byte(transcript), 0)
 	// A real terminal consumes escape sequences invisibly; a needle split by
 	// one — `Sup3r\x1b[31mD4ta!` — would stay legible while "matched nothing"
 	// warned. Strip before matching, and declare the transform.
@@ -1736,6 +1784,7 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	if len(bytes.TrimSpace(src)) == 0 {
 		return rep.fail(exitInput, kindInput, "%s is empty", cmd.File)
 	}
+	warnInvalidUTF8(rep, cmd.File, src, 0)
 	// Same contract as exec: escape codes render nothing on a real terminal,
 	// so they must not hide a needle from the matcher either.
 	stripped, nANSI := stripANSI(src)
