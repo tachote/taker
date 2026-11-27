@@ -869,6 +869,10 @@ func applyChrome(panel *image.NRGBA, ui UIColors, shadow bool) *image.NRGBA {
 // drawShadow lays the window's silhouette under it before the panel is pasted.
 // The silhouette is the window rect pushed down shadowOffsetY; a Chebyshev
 // distance ramp over shadowSpread pixels is what a blur reads as at this size.
+//
+// Pixels inside win are skipped: the panel is pasted over them with draw.Src
+// and roundCorners repaints the corners from the background, so shading them
+// was nine tenths of the work for none of the output.
 func drawShadow(img *image.NRGBA, win image.Rectangle) {
 	shifted := win.Add(image.Pt(0, shadowOffsetY))
 	black := rgb(0, 0, 0)
@@ -878,7 +882,12 @@ func drawShadow(img *image.NRGBA, win image.Rectangle) {
 	x0 := max(b.Min.X, shifted.Min.X-shadowSpread)
 	x1 := min(b.Max.X, shifted.Max.X+shadowSpread)
 	for y := y0; y < y1; y++ {
+		inWinRows := y >= win.Min.Y && y < win.Max.Y
 		for x := x0; x < x1; x++ {
+			if inWinRows && x >= win.Min.X && x < win.Max.X {
+				x = win.Max.X - 1 // jump to the right margin
+				continue
+			}
 			d := max(max(shifted.Min.X-x, x-shifted.Max.X),
 				max(shifted.Min.Y-y, y-shifted.Max.Y))
 			if t := shadowAlpha * float64(shadowSpread-d) / float64(shadowSpread); t > 0 {
