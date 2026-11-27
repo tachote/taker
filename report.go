@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -497,12 +498,18 @@ func (r *reporter) emit(code int) int {
 	r.scrubSecrets()
 	switch {
 	case r.format == "json":
-		buf, err := json.MarshalIndent(r.rep, "", "  ")
-		if err != nil {
+		// No HTML escaping: this is not going into a web page, and the
+		// escaped form turns every <redacted> marker and every && of a shell
+		// line into \u003c… noise a consumer greps past.
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(r.rep); err != nil {
 			r.note("could not encode the json report: %v", err)
 			return code
 		}
-		fmt.Fprintln(r.out, string(buf))
+		r.out.Write(buf.Bytes()) // Encode already ended it with a newline
 	case r.format == "toon" || !r.rep.OK:
 		text, err := r.reportTOON()
 		if err != nil {

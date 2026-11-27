@@ -859,3 +859,29 @@ func TestScrubIsLinear(t *testing.T) {
 		t.Error("the one token was not masked exactly once")
 	}
 }
+
+// The JSON report prints <, > and & as themselves: the README promises values
+// "replaced by <redacted>", and a consumer grepping for that marker — or for
+// the && of the shell line it ran — found \u003credacted\u003e instead.
+func TestJSONReportDoesNotEscapeHTML(t *testing.T) {
+	rep := newReporter("json", "exec")
+	var out bytes.Buffer
+	rep.out = &out
+	rep.rep.Command = `taker exec --sh cat a.sh && echo "<ok>" --redact hunter2`
+	rep.setSecrets([]string{"hunter2"})
+	rep.rep.OK = true
+	rep.emit(exitOK)
+	got := out.String()
+	for _, want := range []string{"<redacted>", `&& echo \"<ok>\"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("json report lacks the literal %q:\n%s", want, got)
+		}
+	}
+	if !strings.HasSuffix(got, "}\n") || strings.HasSuffix(got, "\n\n") {
+		t.Errorf("json report should end in exactly one newline: %q", got[max(0, len(got)-8):])
+	}
+	var back Report
+	if err := json.Unmarshal(out.Bytes(), &back); err != nil || back.Command != rep.rep.Command {
+		t.Errorf("unescaped report does not decode back: %v %q", err, back.Command)
+	}
+}
