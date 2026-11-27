@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -366,6 +367,25 @@ func TestDryRunWritesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Error("dry run wrote the PNG it promised not to")
+	}
+	// "The same document": a preflight that omits the crop cannot be used to
+	// check what the image would show. Compare against a real run's crop.
+	trim := func(dry bool) *Crop {
+		t.Helper()
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Output: out, Lines: "2", DryRun: dry, JSON: true}), r)
+		})
+		if code != exitOK {
+			t.Fatalf("dry=%v run = %d", dry, code)
+		}
+		return rep.Crop
+	}
+	dry, real := trim(true), trim(false)
+	if dry == nil || real == nil {
+		t.Fatalf("crop: dry run %+v, real run %+v; want both present", dry, real)
+	}
+	if dry.First != 2 || dry.Last != 2 || dry.Shown != 1 || !reflect.DeepEqual(dry, real) {
+		t.Errorf("dry-run crop = %+v, real-run crop = %+v; want both lines 2-2 of 2", dry, real)
 	}
 }
 

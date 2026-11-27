@@ -520,6 +520,12 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		return rep.fail(exitRefused, kindRefused, "render: %v", err)
 	}
 	rep.rep.Redactions = rcfg.Redacted
+	// What the image shows, measured off the view that was drawn rather than
+	// assumed from the flags that asked for it. Set before the dry-run exit:
+	// a preflight reports the same document, and the crop is what an agent
+	// checks before it decides the image is worth writing.
+	crop := cropOf(highlight.Extent(lines), total)
+	rep.rep.Crop = &crop
 	if cmd.DryRun {
 		return rep.doneDry(img)
 	}
@@ -529,11 +535,6 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		}
 		return rep.fail(exitFail, kindOutput, "%v", err)
 	}
-
-	// What the image shows, measured off the view that was drawn rather than
-	// assumed from the flags that asked for it.
-	rep.rep.Crop = &Crop{}
-	*rep.rep.Crop = cropOf(highlight.Extent(lines), total)
 	return rep.done(cmd.Output)
 }
 
@@ -1222,6 +1223,9 @@ func finishTerminal(t *terminalRun, rep *reporter) int {
 		return rep.fail(exitRefused, kindRefused, "render: %v", err)
 	}
 	rep.rep.Redactions = rcfg.Redacted
+	// Before the dry-run exit, so a preflight carries the same crop.
+	total := len(t.lines)
+	rep.rep.Crop = &Crop{First: 1, Last: total, Shown: total, Total: &total}
 	if t.dryRun {
 		return rep.doneDry(img)
 	}
@@ -1231,8 +1235,6 @@ func finishTerminal(t *terminalRun, rep *reporter) int {
 		}
 		return rep.fail(exitFail, kindOutput, "%v", err)
 	}
-	total := len(t.lines)
-	rep.rep.Crop = &Crop{First: 1, Last: total, Shown: total, Total: &total}
 	return rep.done(t.output)
 }
 

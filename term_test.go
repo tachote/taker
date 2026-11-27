@@ -98,7 +98,6 @@ func TestTermDryRunWritesNothing(t *testing.T) {
 // doneDry promises the preflight checked "everything the image would claim —
 // marks, crops, height", so the crop belongs in a dry-run report too.
 func TestTermDryRunCarriesTheCrop(t *testing.T) {
-	t.Skip("TODO(P9): finishTerminal (like runSnap) sets the crop only after writing the PNG, so a --dry-run report has no crop")
 	_, file := writeTranscript(t, "$ id\nuid=0(root) gid=0(root)\n")
 	_, rep, _ := runJSON(t, func(r *reporter) int {
 		return runTerm(termCmd(TermCmd{File: file, DryRun: true, JSON: true}), r)
