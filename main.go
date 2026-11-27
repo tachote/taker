@@ -401,8 +401,11 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	// Renumber before anything reads a line number: --lines, --highlight, -m and
 	// the gutter all speak the file's numbering once this has run.
 	all = highlight.ShiftLines(all, cmd.FirstLine)
+	// Specs are clamped to the input's last line before they are expanded:
+	// one entry per line, so "1-999999999" was a gigabyte or a refusal.
+	maxLine := all[len(all)-1].LineNum
 
-	hlLines, err := highlight.ParseHighlightSpec(cmd.Highlight)
+	hlLines, err := highlight.ParseHighlightSpecMax(cmd.Highlight, maxLine)
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "parse highlight: %v", err)
 	}
@@ -418,7 +421,9 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	reMarked, reStats := highlight.FindRegexMarks(msgs, markRe, cmd.MaxMarks)
 	stats = append(stats, reStats...)
 	recordMarks(rep, stats)
-	hlLines = hlLines.Merge(marked[0]).Merge(reMarked[0])
+	// Normalized: -H and -m hitting the same value ("-H 1:10-16 -m sk_live")
+	// otherwise drew nested boxes whose inner border split one value in two.
+	hlLines = hlLines.Merge(marked[0]).Merge(reMarked[0]).Normalize()
 
 	// Redaction searches the untrimmed input like marks do: a secret has to be
 	// hidden in the excerpt, not only in the lines the image ends up showing.
@@ -475,7 +480,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "--context needs --highlight or --mark to center on")
 	}
 
-	lineSpec, err := resolveLineSpec("--lines", cmd.Lines, hlLines, cmd.Context, rep)
+	lineSpec, err := resolveLineSpec("--lines", cmd.Lines, hlLines, cmd.Context, maxLine, rep)
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
@@ -632,11 +637,14 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "--ns has no response to trim; pass -s or -f")
 	}
 
-	reqHL, err := highlight.ParseHighlightSpec(cmd.ReqHL)
+	// Each panel's specs clamp to its own message: they expand one entry per
+	// line, and the renderer drops every line past the end anyway.
+	reqMax, resMax := render.HTTPLineCount(string(reqSrc)), render.HTTPLineCount(string(resSrc))
+	reqHL, err := highlight.ParseHighlightSpecMax(cmd.ReqHL, reqMax)
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "parse --hr: %v", err)
 	}
-	resHL, err := highlight.ParseHighlightSpec(cmd.ResHL)
+	resHL, err := highlight.ParseHighlightSpecMax(cmd.ResHL, resMax)
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "parse --hs: %v", err)
 	}
@@ -651,11 +659,11 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "--context needs --hr, --hs, --mark or --mark-re to center on")
 	}
 
-	reqLines, err := parseLineSpec("--nr", cmd.ReqLines)
+	reqLines, err := parseLineSpec("--nr", cmd.ReqLines, reqMax)
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
-	resLines, err := parseLineSpec("--ns", cmd.ResLines)
+	resLines, err := parseLineSpec("--ns", cmd.ResLines, resMax)
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
@@ -928,7 +936,8 @@ func termMarks(lines []highlight.LineTokens, needles []string, res []*regexp.Reg
 	m1, s1 := highlight.FindMarks(msgs, needles, maxMarks)
 	m2, s2 := highlight.FindRegexMarks(msgs, res, maxMarks)
 	recordMarks(rep, append(s1, s2...))
-	return m1[0].Merge(m2[0])
+	// Two needles on one value draw one box, not nested ones.
+	return m1[0].Merge(m2[0]).Normalize()
 }
 
 // ansiRe covers the escape sequences a terminal consumes invisibly: CSI
@@ -1546,20 +1555,23 @@ func listThemes(rep *reporter) int {
 // Context only applies to a panel that has highlights to center on. In HTTP mode
 // one side often carries none — the request in a response-only finding — and
 // that side must still render, not abort the run.
-func resolveLineSpec(flag, spec string, hl highlight.Marks, context int, rep *reporter) ([]int, error) {
-	if s := highlight.ContextSpec(hl, context); s != nil {
+//
+// maxLine is the input's last line number: windows and ranges are clamped to
+// it before they are expanded line by line.
+func resolveLineSpec(flag, spec string, hl highlight.Marks, context, maxLine int, rep *reporter) ([]int, error) {
+	if s := highlight.ContextSpecMax(hl, context, maxLine); s != nil {
 		if spec != "" {
 			rep.warn("--context overrides %s; ignoring it", flag)
 		}
 		return s, nil
 	}
-	return parseLineSpec(flag, spec)
+	return parseLineSpec(flag, spec, maxLine)
 }
 
 // parseLineSpec returns an error instead of exiting, so the caller can report it
 // with the flag named and the right exit code.
-func parseLineSpec(flag, spec string) ([]int, error) {
-	parsed, err := highlight.ParseLineSpec(spec)
+func parseLineSpec(flag, spec string, maxLine int) ([]int, error) {
+	parsed, err := highlight.ParseLineSpecMax(spec, maxLine)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", flag, err)
 	}

@@ -250,6 +250,20 @@ func tokenizeHTTP(msg string, style *chroma.Style) ([]highlight.LineTokens, http
 	return append(lines, bodyLines...), layout, nil
 }
 
+// HTTPLineCount is the number of the last line RenderHTTP numbers in msg. The
+// caller parses --nr/--hr against it before rendering: a line spec is expanded
+// one entry per line, and "1-999999999" on a 20-line capture must clamp to the
+// capture instead of allocating a gigabyte or being refused. A trailing
+// newline closes the last line rather than opening one, as in Tokenize.
+func HTTPLineCount(msg string) int {
+	raw := messageLines(msg)
+	n := len(raw)
+	if n > 1 && raw[n-1] == "" {
+		n--
+	}
+	return n
+}
+
 // messageLines splits a message on the lines Tokenize numbers: chroma turns
 // CRLF and a lone CR into LF before it lexes.
 func messageLines(msg string) []string {
@@ -673,6 +687,10 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			resHL = resHL.Merge(m)
 		}
 	}
+	// --hr and --mark on the same value draw one box: unioned, the spans no
+	// longer nest a border inside the value. Normalize copies, so the
+	// caller's maps stay as they were handed in.
+	reqHL, resHL = reqHL.Normalize(), resHL.Normalize()
 
 	// Redact literals are hidden, not marked — found the same way but painted
 	// over rather than boxed in red. They never merge into HighlightLines.
@@ -716,13 +734,15 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	// center on, so the warning is decided here, per panel: the caller cannot
 	// know before tokenizing whether a --mark literal landed on this side.
 	reqSpec, resSpec := cfg.RequestLines, cfg.ResponseLines
-	if s := highlight.ContextSpec(reqHL, cfg.Context); s != nil {
+	// Windows clamp to the panel's own last line before they are expanded:
+	// "--context 10000000" costs a few lines, not a gigabyte.
+	if s := highlight.ContextSpecMax(reqHL, cfg.Context, totalReq); s != nil {
 		if reqSpec != nil {
 			cfg.warnf("--context overrides --nr; ignoring it")
 		}
 		reqSpec = s
 	}
-	if s := highlight.ContextSpec(resHL, cfg.Context); s != nil {
+	if s := highlight.ContextSpecMax(resHL, cfg.Context, totalRes); s != nil {
 		if resSpec != nil {
 			cfg.warnf("--context overrides --ns; ignoring it")
 		}

@@ -1017,3 +1017,26 @@ func TestSinglePaneErrorNamesPanel(t *testing.T) {
 		t.Errorf("err = %v, want it prefixed with the panel name", err)
 	}
 }
+
+// HTTPLineCount is what the CLI clamps --nr/--hr against before rendering, so
+// it has to name the same last line the renderer numbers.
+func TestHTTPLineCountMatchesTheTokenizer(t *testing.T) {
+	for _, msg := range []string{
+		testReq,
+		testRes,
+		"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+		"GET / HTTP/1.1\nHost: x",
+		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello\n\n",
+		"HTTP/1.1 200 OK\nContent-Type: text/html\n\n<p>a</p>\n   ",
+		"HTTP/1.1 204 No Content\r\r\r",
+		"HTTP/1.1 200 OK\nContent-Type: application/xml\n\n<a>\n<b/>\n</a>",
+	} {
+		lines, _, err := tokenizeHTTP(msg, BurpStyle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := HTTPLineCount(msg), lines[len(lines)-1].LineNum; got != want {
+			t.Errorf("HTTPLineCount(%q) = %d, the renderer numbers %d", msg, got, want)
+		}
+	}
+}
