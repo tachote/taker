@@ -572,11 +572,20 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	// A 3000-line body is taller than any viewer can open, so trim to what
 	// matters. Gap bands report what was left out inside the view; the footnote
 	// reports what the view itself left out.
+	// --context replaces a panel's range only when that panel has a mark to
+	// center on, so the warning is decided here, per panel: the caller cannot
+	// know before tokenizing whether a --mark literal landed on this side.
 	reqSpec, resSpec := cfg.RequestLines, cfg.ResponseLines
 	if s := highlight.ContextSpec(reqHL, cfg.Context); s != nil {
+		if reqSpec != nil {
+			cfg.warnf("--context overrides --nr; ignoring it")
+		}
 		reqSpec = s
 	}
 	if s := highlight.ContextSpec(resHL, cfg.Context); s != nil {
+		if resSpec != nil {
+			cfg.warnf("--context overrides --ns; ignoring it")
+		}
 		resSpec = s
 	}
 	reqLines = highlight.FilterLines(reqLines, reqSpec)

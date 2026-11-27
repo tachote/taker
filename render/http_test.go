@@ -774,3 +774,55 @@ func TestStatusLineWarningAfterInterimBlock(t *testing.T) {
 		}
 	}
 }
+
+// --context only replaces a panel's line range when that panel has a mark to
+// center on. A panel without marks keeps its --nr/--ns, so warning that the
+// range was ignored would contradict the image.
+func TestContextOverrideWarningIsExact(t *testing.T) {
+	reqSpec, err := highlight.ParseLineSpec("1-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(mark string) ([]string, *HTTPFacts) {
+		var warned []string
+		facts := &HTTPFacts{}
+		_, err := RenderHTTP(&HTTPConfig{
+			Request: testReq, Response: testRes,
+			Mark: []string{mark}, Context: 1,
+			RequestLines: reqSpec, ResponseLines: reqSpec,
+			Warn:  func(m string) { warned = append(warned, m) },
+			Facts: facts,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return warned, facts
+	}
+	has := func(ws []string, s string) bool {
+		for _, w := range ws {
+			if strings.Contains(w, s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// The mark is in the response only: --nr is applied, --ns is overridden.
+	warned, facts := run(`"admin":true`)
+	if has(warned, "overrides --nr") {
+		t.Errorf("warned that --nr was ignored, but the request view is %d-%d: %v",
+			facts.Request.First, facts.Request.Last, warned)
+	}
+	if facts.Request.First != 1 || facts.Request.Last != 2 {
+		t.Errorf("request extent = %d-%d, want --nr's 1-2", facts.Request.First, facts.Request.Last)
+	}
+	if !has(warned, "--context overrides --ns; ignoring it") {
+		t.Errorf("no --ns override warning in %v", warned)
+	}
+
+	// The mark is in the request only: the reverse.
+	warned, _ = run("hunter2")
+	if !has(warned, "--context overrides --nr; ignoring it") || has(warned, "overrides --ns") {
+		t.Errorf("warnings = %v, want only the --nr override", warned)
+	}
+}
