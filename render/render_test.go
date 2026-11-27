@@ -892,3 +892,28 @@ func TestGitHubLightTranscriptIsReadable(t *testing.T) {
 		}
 	}
 }
+
+// The gap label has to sit inside its band. Drawn with the code face its line
+// box was taller than the band, and the descenders of "skipped" ran through
+// the bottom hairline.
+func TestGapLabelStaysInsideItsBand(t *testing.T) {
+	all, err := highlight.Tokenize("a = 1\nb = 2\nc = 3\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []highlight.LineTokens{all[0], {IsGap: true, Skipped: 1}, all[2]}
+	img, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := metricsFor()
+	ui := DefaultTheme.UI
+	top := chromeMargin + tabBarHeight + paddingY + m.lineHeightFor(lineHeightMul)
+	for _, y := range []int{top, top + gapRowHeight - 1} {
+		for x := chromeMargin + chromeRadius; x < img.Bounds().Dx()-chromeMargin-chromeRadius; x++ {
+			if got := img.NRGBAAt(x, y); got != ui.GutterSep {
+				t.Fatalf("hairline at y=%d has %v at x=%d, want GutterSep %v: the label crosses it", y, got, x, ui.GutterSep)
+			}
+		}
+	}
+}

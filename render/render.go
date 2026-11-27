@@ -609,10 +609,13 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 			fillRect(img, image.Rect(0, y, l.totalWidth, y+1), ui.GutterSep)
 			fillRect(img, image.Rect(0, y+gapRowHeight-1, l.totalWidth, y+gapRowHeight), ui.GutterSep)
 			// Centred in the code area: the count belongs to the view, not to
-			// a column of text. LineNumFg, not GapFg — it must stay readable.
+			// a column of text — so it takes the UI face, whose line box fits
+			// the band; the code face's is taller than the band and its
+			// descenders crossed the bottom hairline. LineNumFg, not GapFg —
+			// it must stay readable.
 			label := gapLabel(vl.skipped)
-			lx := l.codeX + max(0, (l.totalWidth-l.codeX-textWidth(l.face, label))/2)
-			drawString(img, l.face, label, lx, l.baselineIn(y, gapRowHeight), ui.LineNumFg)
+			lx := l.codeX + max(0, (l.totalWidth-l.codeX-textWidth(l.uiFace, label))/2)
+			drawString(img, l.uiFace, label, lx, l.baselineUI(y, gapRowHeight), ui.LineNumFg)
 			y += gapRowHeight
 			continue
 		}
