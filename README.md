@@ -463,8 +463,9 @@ image that travels without the report still describes itself — with one
 exception: every `--redact` literal is replaced by `<redacted>` in `command`
 and in the PNG chunks, because a masked value must not leak through
 provenance. Each `sha256` covers the input as taker matched and drew it, in
-every mode: first normalized (ANSI escapes stripped; BOM, zero-width and other
-invisible format characters removed), then masked (every `--redact` literal,
+every mode: first normalized (ANSI escapes stripped; text composed to Unicode
+NFC; BOM, zero-width and other invisible format characters, and combining
+marks with no precomposed form, removed), then masked (every `--redact` literal,
 its double-quoted form, its separator-split parts of 3 bytes or more, and
 every `--redact-re` match replaced by `<redacted>`, longest match first, left
 to right). A hash of the raw bytes would let anyone who holds the image

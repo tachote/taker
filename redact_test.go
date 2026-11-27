@@ -146,3 +146,47 @@ func TestOutputMustNotOverwriteTheInput(t *testing.T) {
 		})
 	}
 }
+
+// A decomposed accent is a combining mark, and deleting it changed names in
+// the evidence ("Jos\u00e9" drawn as "Jose"). NFC composes it first; only a mark
+// with no precomposed form is still removed — and counted.
+func TestNormalizeZeroWidthComposesAccents(t *testing.T) {
+	for _, tc := range []struct {
+		in, want string
+		removed  int
+	}{
+		{"name = \"Jose\u0301\"", "name = \"Jos\u00e9\"", 0},
+		{"n\u0303", "\u00f1", 0},
+		{"plain ascii", "plain ascii", 0},
+		{"q\u0307", "q", 1},                  // no precomposed q-dot-above
+		{"to\u200bken\ufeff", "token", 2},    // zero-width splices still go
+		{"Jose\u0301\u200b", "Jos\u00e9", 1}, // composed, then the ZWSP removed
+	} {
+		got, n := normalizeZeroWidth([]byte(tc.in))
+		if string(got) != tc.want || n != tc.removed {
+			t.Errorf("normalizeZeroWidth(%q) = %q, %d; want %q, %d", tc.in, got, n, tc.want, tc.removed)
+		}
+	}
+}
+
+// End to end: a decomposed name renders composed, with no removal warning,
+// and a needle typed precomposed matches it.
+func TestSnapKeepsDecomposedAccents(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "uni.py")
+	if err := os.WriteFile(file, []byte("name = \"Jose\u0301\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: filepath.Join(dir, "o.png"), JSON: true, Mark: []string{"Jos\u00e9"}}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("snap = %d", code)
+	}
+	if hasWarning(rep, "removed") {
+		t.Errorf("warnings = %v, a composable accent is not an invisible character", rep.Warnings)
+	}
+	if len(rep.Marks) != 1 || rep.Marks[0].Matches != 1 {
+		t.Errorf("marks = %+v, want the precomposed needle to match the decomposed text", rep.Marks)
+	}
+}

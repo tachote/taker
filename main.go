@@ -21,6 +21,7 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/tachote/taker/highlight"
 	"github.com/tachote/taker/render"
+	"golang.org/x/text/unicode/norm"
 )
 
 // SnapCmd renders a single code file.
@@ -886,7 +887,7 @@ func normalizeInput(b []byte, rep *reporter) []byte {
 	}
 	out, m := normalizeZeroWidth(stripped)
 	if m > 0 {
-		rep.warn("removed %d invisible/format characters (BOM, ZWSP, combining marks) so the needle stays contiguous", m)
+		rep.warn("removed %d invisible/format characters (BOM, ZWSP, combining marks with no precomposed form) so the needle stays contiguous", m)
 	}
 	return out
 }
@@ -897,11 +898,20 @@ func normalizeInput(b []byte, rep *reporter) []byte {
 // not contain; deleting them makes the spliced needle contiguous again, and
 // because matcher and renderer share the normalized text, columns stay
 // aligned and the box lands on the needle.
+//
+// The text is composed to NFC first. A decomposed accent ("Jose" + U+0301)
+// is a combining mark too, and deleting it rendered "José" as "Jose" — a
+// changed name in the evidence. Composed, it is one rune and one cell, so
+// only the marks with no precomposed form are left to delete.
 func normalizeZeroWidth(b []byte) ([]byte, int) {
+	composed := b
+	if !norm.NFC.IsNormal(b) {
+		composed = norm.NFC.Bytes(b)
+	}
 	var sb strings.Builder
-	sb.Grow(len(b))
+	sb.Grow(len(composed))
 	n := 0
-	for _, r := range string(b) {
+	for _, r := range string(composed) {
 		if r == '\uFEFF' || r == '\u00AD' || unicode.Is(unicode.Cf, r) ||
 			unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) {
 			n++
@@ -910,7 +920,7 @@ func normalizeZeroWidth(b []byte) ([]byte, int) {
 		sb.WriteRune(r)
 	}
 	if n == 0 {
-		return b, 0
+		return composed, 0
 	}
 	return []byte(sb.String()), n
 }
