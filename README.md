@@ -94,7 +94,7 @@ taker [file] [flags]
 | `--mark` | `-m` | — | Highlight every occurrence of this text; a comma is part of it. Repeat `-m` for more |
 | `--mark-re` | | — | Highlight every regex match. Repeatable; a comma splits the value in two (write `\,` to keep it), except inside `{}`, `[]` or `()` |
 | `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal, earliest first |
-| `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable; a comma splits the value in two (write `\,` to keep it). The value's parts between `-:=,/.;` and spaces (3 characters or more) are also hidden where they stand as whole tokens, so a fragment a parser echoed is not left readable |
+| `--redact` | | — | Hide every occurrence of this text under a black box. Repeatable; a comma splits the value in two (write `\,` to keep it). The value's parts between `-:=,/.;` and spaces (3 bytes or more) are also hidden where they stand as whole tokens, so a fragment a parser echoed is not left readable |
 | `--redact-re` | | — | Hide every regex match under a black box. Repeatable; commas split as for `--mark-re` |
 | `--redact-keep` | | 0 | Leave the first N characters of each `--redact` match visible (`4` → `sk_l…████`). A run where any match is N characters or shorter is refused (exit 2): that match would be drawn in full |
 | `--label` | `-L` | — | Caption stating what the image proves |
@@ -595,8 +595,12 @@ steps:
    followed by combining marks (NFC on that sequence only, never on a letter
    NFC would replace, such as U+212A KELVIN SIGN), then remove the BOM,
    zero-width and other invisible format characters, and the combining marks
-   left over. On a line where composing would move a `--redact` or `--mark`
-   match off its text, the sequences under that match are not composed.
+   left over. On a line where composing would move a `--redact`,
+   `--redact-re`, `--mark` or `--mark-re` match (or a `--redact` fragment) off
+   its text, the sequences under that match and the shown segment next to it
+   are not composed; if that is not enough, the whole line is left
+   uncomposed. Those marks are then removed, so an accent there is drawn as
+   its base letter.
 2. **Mask.** Replace with `<redacted>`, longest match first and left to right:
    every `--redact` literal, its double-quoted form (`"value"`, quotes
    included), each of its parts between `-:=,/.;` and spaces that is 3 bytes or
@@ -759,6 +763,7 @@ Icons are rendered using [Symbols Nerd Font](https://www.nerdfonts.com/) embedde
 | [alecthomas/chroma](https://github.com/alecthomas/chroma) | Syntax highlighting (200+ languages) |
 | [alecthomas/kong](https://github.com/alecthomas/kong) | CLI flag parsing |
 | [golang.org/x/image](https://pkg.go.dev/golang.org/x/image) | Font rendering, image primitives |
+| [golang.org/x/text](https://pkg.go.dev/golang.org/x/text) | NFC composition of input text |
 
 **Embedded assets:**
 - [JetBrains Mono](https://www.jetbrains.com/lp/mono/) — code font (SIL Open Font License 1.1)
