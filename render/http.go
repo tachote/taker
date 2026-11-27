@@ -261,12 +261,17 @@ func (cfg *HTTPConfig) warnUnreadableBody(side, msg string, layout httpLayout) {
 	}
 }
 
+// mediaType is a Content-Type value without its parameters.
+func mediaType(contentType string) string {
+	mime, _, _ := strings.Cut(contentType, ";")
+	return strings.TrimSpace(mime)
+}
+
 // bodyLexer names the lexer for a declared Content-Type, with the fallback
 // chroma's own http lexer uses: a structured suffix ("application/problem+json")
 // is read as its base type when the full type has no lexer of its own.
 func bodyLexer(contentType string) string {
-	mime, _, _ := strings.Cut(contentType, ";")
-	mime = strings.TrimSpace(mime)
+	mime := mediaType(contentType)
 	lx := lexers.MatchMimeType(mime)
 	if slash, plus := strings.Index(mime, "/"), strings.LastIndex(mime, "+"); lx == nil && slash >= 0 && plus > slash {
 		lx = lexers.MatchMimeType(mime[:slash+1] + mime[plus+1:])
@@ -820,12 +825,27 @@ type burpTab struct {
 // JSON object, so both start with the "eyJ" that encodes `{"`.
 var jwtRe = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}`)
 
-// htmlRe recognises markup Burp's Render view can display. The opening tag
+// htmlRe recognises markup in a body that declares no type. The opening tag
 // needs a delimiter after it, or prose like "not <html-ish" counts as markup.
-var htmlRe = regexp.MustCompile(`(?i)content-type:[ \t]*text/html|<!doctype[ \t]+html|<html[ \t\r\n>]`)
+var htmlRe = regexp.MustCompile(`(?i)<!doctype[ \t]+html|<html[ \t\r\n>]`)
 
-// isHTML reports whether a response body is markup Burp could render.
-func isHTML(message string) bool { return htmlRe.MatchString(message) }
+// isHTML reports whether a response body is markup Burp could render. Burp
+// decides from the declared Content-Type, as burpBodyTokens does: a JSON API
+// that returns markup inside a string is JSON, and a browser does not render
+// it — for XSS evidence an enabled Render tab would claim otherwise. Only a
+// message without a declared type has its body sniffed.
+func isHTML(message string) bool {
+	lines := messageLines(message)
+	layout := layoutHTTP(lines)
+	if layout.contentType != "" {
+		switch mediaType(layout.contentType) {
+		case "text/html", "application/xhtml+xml":
+			return true
+		}
+		return false
+	}
+	return htmlRe.MatchString(strings.Join(lines[layout.body:], "\n"))
+}
 
 // burpTabs is the view strip Burp shows above a message editor. Burp adds an
 // editor tab per detected payload type, so a request bearing a JWT gets one.

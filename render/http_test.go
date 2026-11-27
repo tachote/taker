@@ -897,3 +897,25 @@ func TestUnreadableBodyWarns(t *testing.T) {
 		t.Errorf("warned about a text body: %v", w)
 	}
 }
+
+// Burp enables Render from the declared Content-Type. A JSON API that returns
+// markup inside a string is still JSON, which a browser does not render — and
+// for XSS evidence, the declared type is the point. Only an untyped body is
+// sniffed.
+func TestRenderTabFollowsContentType(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + `{"tpl":"<html><body>hi</body></html>"}`: false,
+		"HTTP/1.1 200 OK\nContent-Type: text/plain\n\n<html><body>hi</body></html>":                      false,
+		"HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\n\n<p>x</p>":                            true,
+		"HTTP/1.1 200 OK\nContent-Type: application/xhtml+xml\n\n<p>x</p>":                               true,
+		"HTTP/1.1 200 OK\n\n<!DOCTYPE html>\n<p>x</p>":                                                   true,
+		"HTTP/1.1 200 OK\nServer: x\n\n<html>":                                                           true,
+		"HTTP/1.1 100 Continue\n\nHTTP/1.1 200 OK\nContent-Type: text/html\n\n<p>x</p>":                  true,
+		"HTTP/1.1 200 OK\nX-Note: <html>\n\n{}":                                                          false,
+	} {
+		tabs := burpTabs("Response", msg)
+		if got := !tabs[len(tabs)-1].disabled; got != want {
+			t.Errorf("Render enabled = %v, want %v for %q", got, want, msg)
+		}
+	}
+}
