@@ -341,6 +341,12 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 			return rep.fail(exitUsage, kindUsage, "no input: stdin produced no data within 300ms")
 		}
 		src, err = io.ReadAll(r)
+		// Piped bytes get the file path's treatment: a needle spliced by an
+		// ANSI escape would otherwise stay legible while "matched nothing"
+		// warned, and the hash would cover bytes the image does not show.
+		if err == nil {
+			src = normalizeInput(src, rep)
+		}
 	}
 	if err != nil {
 		return rep.fail(exitInput, kindInput, "%v", err)
