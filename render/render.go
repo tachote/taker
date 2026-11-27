@@ -797,17 +797,24 @@ type markRun struct{ x1, x2, y1, y2 int }
 // non-contiguous highlights get one box each instead of one box swallowing
 // everything between them. Rows only merge when they span the same columns —
 // otherwise a narrow column mark would be stretched to a neighbour's width.
+//
+// Runs are matched by their columns, not by order: a row with two marks
+// arrives interleaved with the next row's (A1, B1, A2, B2), and comparing each
+// row only with the last run kept A2 from ever meeting A1. Output keeps the
+// order in which each run first appeared.
 func mergeRuns(rows []markRun) []markRun {
 	if len(rows) == 0 {
 		return nil
 	}
-	runs := []markRun{rows[0]}
-	for _, r := range rows[1:] {
-		last := &runs[len(runs)-1]
-		if r.y1 == last.y2 && r.x1 == last.x1 && r.x2 == last.x2 {
-			last.y2 = r.y2
+	var runs []markRun
+	open := map[[2]int]int{} // columns -> index of the newest run with them
+	for _, r := range rows {
+		key := [2]int{r.x1, r.x2}
+		if i, ok := open[key]; ok && runs[i].y2 == r.y1 {
+			runs[i].y2 = r.y2
 			continue
 		}
+		open[key] = len(runs)
 		runs = append(runs, r)
 	}
 	return runs

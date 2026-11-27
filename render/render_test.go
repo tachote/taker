@@ -35,6 +35,18 @@ func TestMergeRuns(t *testing.T) {
 			[]markRun{{10, 40, 0, 10}, {10, 90, 10, 20}},
 			[]markRun{{10, 40, 0, 10}, {10, 90, 10, 20}},
 		},
+		{
+			// Two marks per row arrive interleaved; each column pair is its own
+			// run, or the rows get doubled borders between them.
+			"two marks per row",
+			[]markRun{{10, 40, 0, 10}, {60, 90, 0, 10}, {10, 40, 10, 20}, {60, 90, 10, 20}},
+			[]markRun{{10, 40, 0, 20}, {60, 90, 0, 20}},
+		},
+		{
+			"interleaved run resumes after a gap",
+			[]markRun{{10, 40, 0, 10}, {60, 90, 0, 10}, {10, 40, 30, 40}},
+			[]markRun{{10, 40, 0, 10}, {60, 90, 0, 10}, {10, 40, 30, 40}},
+		},
 	}
 	for _, c := range cases {
 		if got := mergeRuns(c.in); !reflect.DeepEqual(got, c.want) {
