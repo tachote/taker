@@ -441,8 +441,9 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "-o must differ from the input file — it would overwrite the source")
 	}
 
-	theme, err := resolveTheme(cmd.Theme)
+	theme, err := resolveTheme(cmd.Theme, "source code")
 	if err != nil {
+		themeHelp(rep)
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
 	if cmd.Chrome != "editor" && cmd.Chrome != "window" {
@@ -1747,8 +1748,9 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	if cmd.Timeout < 1 {
 		return rep.fail(exitUsage, kindUsage, "--timeout must be at least 1 second, got %d", cmd.Timeout)
 	}
-	theme, err := resolveTheme(cmd.Theme)
+	theme, err := resolveTheme(cmd.Theme, "a transcript")
 	if err != nil {
+		themeHelp(rep)
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
 	if cmd.Chrome != "editor" && cmd.Chrome != "window" {
@@ -1937,8 +1939,9 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 			return code
 		}
 	}
-	theme, err := resolveTheme(cmd.Theme)
+	theme, err := resolveTheme(cmd.Theme, "a transcript")
 	if err != nil {
+		themeHelp(rep)
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
 	if cmd.Chrome != "editor" && cmd.Chrome != "window" {
@@ -2194,18 +2197,29 @@ func clampWrapWidth(w int, httpMode bool, rep *reporter) int {
 	return w
 }
 
-func resolveTheme(name string) (*render.Theme, error) {
+// resolveTheme looks --theme up for a mode that is not http; content names
+// what that mode draws ("source code", "a transcript"), so the refusal says
+// what would actually come out flat.
+//
+// The error stays one plain sentence: the next command goes through
+// themeHelp into help[], where a script reads it, and error.message no longer
+// carries terminal layout.
+func resolveTheme(name, content string) (*render.Theme, error) {
 	theme, ok := render.Themes[strings.ToLower(name)]
 	if !ok {
-		return nil, fmt.Errorf("unknown theme %q — run 'taker --list-themes' to see options", name)
+		return nil, fmt.Errorf("unknown theme %q", name)
 	}
 	// Its style only covers the HTTP lexer's token types, so source code comes
 	// out flat — every keyword falling back to the plain text color.
 	if theme.HTTPOnly {
-		return nil, fmt.Errorf("theme %q is only for `taker http` (source code renders without highlighting) — "+
-			"use vscode-dark (default) or run 'taker --list-themes'", name)
+		return nil, fmt.Errorf("theme %q is only for `taker http` (%s renders without highlighting)", name, content)
 	}
 	return theme, nil
+}
+
+// themeHelp is the next step after a resolveTheme refusal.
+func themeHelp(rep *reporter) {
+	rep.helpf("run 'taker --list-themes' to see options; vscode-dark is the default")
 }
 
 // writePNG encodes to a temporary file and renames it into place.

@@ -360,3 +360,47 @@ func TestParseErrorErgonomics(t *testing.T) {
 		t.Errorf("flag before http = %d, mode %q, help %q", code, rep.Mode, rep.Help)
 	}
 }
+
+// A theme refusal is one plain sentence in error.message — no embedded
+// newline or continuation indent — and the next command is in help[], where a
+// script finds it. The HTTP-only refusal names what the mode actually draws.
+func TestThemeErrorsCarryTheHint(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "t.txt"), []byte("$ id\nuid=0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"snap unknown", []string{"a.py", "-T", "nope", "--json", "--dry-run"}, `unknown theme "nope"`},
+		{"snap http-only", []string{"a.py", "-T", "burp", "--json", "--dry-run"}, "(source code renders without highlighting)"},
+		{"term http-only", []string{"term", "t.txt", "-T", "burp", "--json", "--dry-run"}, "(a transcript renders without highlighting)"},
+		{"exec http-only", []string{"exec", "-T", "burp", "--json", "--dry-run", "--", "true"}, "(a transcript renders without highlighting)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			code, stdout, stderr := runTaker(t, dir, tc.args...)
+			if code != exitUsage {
+				t.Fatalf("exit = %d, want %d\nstdout:\n%s\nstderr:\n%s", code, exitUsage, stdout, stderr)
+			}
+			var rep Report
+			if err := json.Unmarshal([]byte(stdout), &rep); err != nil {
+				t.Fatalf("not a json report: %v\n%s", err, stdout)
+			}
+			msg := rep.Error.Message
+			if !strings.Contains(msg, tc.want) {
+				t.Errorf("error.message = %q, want %q", msg, tc.want)
+			}
+			if strings.ContainsAny(msg, "\n") || strings.Contains(msg, "list-themes") || strings.HasSuffix(msg, ".") {
+				t.Errorf("error.message = %q, want one plain sentence without the hint", msg)
+			}
+			if !slices.ContainsFunc(rep.Help, func(h string) bool { return strings.Contains(h, "taker --list-themes") }) {
+				t.Errorf("help = %q, want the taker --list-themes hint", rep.Help)
+			}
+		})
+	}
+}

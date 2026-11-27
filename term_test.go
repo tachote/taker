@@ -200,7 +200,7 @@ func TestTermMissingFileIsInputError(t *testing.T) {
 // A terminal sets tab stops every 8 columns, so a table ls or ps aligned
 // there must stay aligned in the image. Snap's 4 shifted every column.
 func TestTranscriptTabsStopEvery8(t *testing.T) {
-	theme, err := resolveTheme("vscode-dark")
+	theme, err := resolveTheme("vscode-dark", "a transcript")
 	if err != nil {
 		t.Fatal(err)
 	}
