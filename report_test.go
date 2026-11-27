@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -883,5 +884,75 @@ func TestJSONReportDoesNotEscapeHTML(t *testing.T) {
 	var back Report
 	if err := json.Unmarshal(out.Bytes(), &back); err != nil || back.Command != rep.rep.Command {
 		t.Errorf("unescaped report does not decode back: %v %q", err, back.Command)
+	}
+}
+
+// A detached PNG has to prove its version by machine, not only in footnote
+// pixels: the revision and the source path travel as metadata next to the
+// hash, and they say what the report says.
+func TestPNGCarriesSourceAndRevision(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "auth.py"), []byte("def login():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "add auth")
+
+	out := filepath.Join(dir, "g.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{Git: "HEAD:auth.py", RepoDir: dir, Output: out, JSON: true}), r)
+	})
+	if code != exitOK || rep.Source == nil || rep.Source.Rev == "" {
+		t.Fatalf("run = %d, source = %+v", code, rep.Source)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := pngTextChunks(t, data)
+	if meta["taker:git-revision"] != rep.Source.Rev {
+		t.Errorf("taker:git-revision = %q, report rev = %q", meta["taker:git-revision"], rep.Source.Rev)
+	}
+	if meta["taker:source"] != "git:auth.py" {
+		t.Errorf("taker:source = %q, want git:auth.py", meta["taker:source"])
+	}
+
+	// A file input names its path; a redacted needle in it stays masked in
+	// the metadata exactly as it is in the report.
+	file := filepath.Join(dir, "hunter2-dump.py")
+	if err := os.WriteFile(file, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = filepath.Join(dir, "f.png")
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: out, Redact: []string{"hunter2"}, JSON: true}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	if data, err = os.ReadFile(out); err != nil {
+		t.Fatal(err)
+	}
+	meta = pngTextChunks(t, data)
+	if got := meta["taker:source"]; got != "file:"+rep.Source.Path || strings.Contains(got, "hunter2") {
+		t.Errorf("taker:source = %q, report path = %q", got, rep.Source.Path)
+	}
+	if _, ok := meta["taker:git-revision"]; ok {
+		t.Error("a plain file claims a git revision")
 	}
 }

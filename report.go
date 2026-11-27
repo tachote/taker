@@ -158,7 +158,7 @@ type reporter struct {
 	out    io.Writer // stdout: the report, the theme list, nothing else
 	format string    // "", "json" or "toon"
 	rep    Report
-	metaKV [][2]string // PNG tEXt chunks beyond the always-present set
+	metaKV [][2]string // PNG text chunks beyond the always-present set
 	// secrets are the --redact literals of this run: the image hides them,
 	// so every string that leaves the process — warnings, help, errors,
 	// provenance — hides them too. Set as early as the flags are known.
@@ -377,14 +377,7 @@ func (m *scrubMatcher) matchLen(s string, i int) int {
 // Warnings and help are scrubbed at format time, so they never carry the
 // literal regardless of ordering.
 func (r *reporter) scrubSecrets() {
-	// ANSI escapes inside a recorded command split a needle the same way they
-	// do inside a file — normalize before masking or `mR9!^[[31mkXv2` keeps
-	// both halves readable in the PNG's own tEXt chunk.
-	deansi := func(s string) string {
-		b, _ := stripANSI([]byte(s))
-		return string(b)
-	}
-	r.rep.Command = scrubRedactArgs(r.scrub(deansi(r.rep.Command)))
+	r.rep.Command = r.scrubMeta(r.rep.Command)
 	if r.rep.Source != nil {
 		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
 	}
@@ -396,7 +389,7 @@ func (r *reporter) scrubSecrets() {
 		if strings.HasPrefix(kv[0], "taker:sha256") {
 			continue
 		}
-		r.metaKV[i][1] = scrubRedactArgs(r.scrub(deansi(kv[1])))
+		r.metaKV[i][1] = r.scrubMeta(kv[1])
 	}
 	for i, w := range r.rep.Warnings {
 		r.rep.Warnings[i] = r.scrub(w)
@@ -405,6 +398,33 @@ func (r *reporter) scrubSecrets() {
 		r.rep.Marks[i].Needle = r.scrub(m.Needle)
 	}
 	r.rep.Output = r.scrub(r.rep.Output)
+}
+
+// scrubMeta masks one provenance value. ANSI escapes inside a recorded
+// command split a needle the same way they do inside a file — normalize
+// before masking or `mR9!^[[31mkXv2` keeps both halves readable in the PNG's
+// own text chunk.
+func (r *reporter) scrubMeta(v string) string {
+	b, _ := stripANSI([]byte(v))
+	return scrubRedactArgs(r.scrub(string(b)))
+}
+
+// pngMeta is the metadata the PNG carries beyond version, time and command:
+// the input hashes, and where the input came from — the same source path and
+// revision the report states. Without them a detached image proves its
+// version only in footnote pixels, which no tool can check. An exec run is
+// left out of taker:source: taker:exec already names its command line.
+func (r *reporter) pngMeta() [][2]string {
+	meta := slices.Clone(r.metaKV)
+	if src := r.rep.Source; src != nil {
+		if src.Path != "" && src.Kind != "exec" {
+			meta = append(meta, [2]string{"taker:source", r.scrubMeta(src.Kind + ":" + src.Path)})
+		}
+		if src.Rev != "" {
+			meta = append(meta, [2]string{"taker:git-revision", src.Rev})
+		}
+	}
+	return meta
 }
 
 // helpf records the command that fixes or completes the current situation.

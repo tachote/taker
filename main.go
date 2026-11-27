@@ -1624,7 +1624,7 @@ func writePNG(img image.Image, path string, rep *reporter) error {
 	if rep.rep.Command != "" {
 		meta = append(meta, [2]string{"taker:command", rep.rep.Command})
 	}
-	meta = append(meta, rep.metaKV...)
+	meta = append(meta, rep.pngMeta()...)
 	data, err := pngWithMeta(img, meta)
 	if err != nil {
 		return fail(fmt.Errorf("encode png: %w", err))
