@@ -276,6 +276,10 @@ Content-Type: application/x-www-form-urlencoded
 grant_type=client_credentials&client_secret=EXPOSED_SECRET
 ```
 
+An HTTP/2 request copied in pseudo-header form (DevTools, HTTP/2 proxies),
+with no request line, is accepted too: its first line is `:method:`,
+`:path:`, `:authority:` or `:scheme:`.
+
 **Response file format** (`response.http`):
 ```
 HTTP/2 200 OK

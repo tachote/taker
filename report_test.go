@@ -625,6 +625,42 @@ func TestHTTPFValidation(t *testing.T) {
 	}
 }
 
+// An HTTP/2 request copied in pseudo-header form has no request line. The
+// renderer draws it, so -r and a request-only -f accept it too; a log file
+// that merely mentions a header is still refused.
+func TestHTTP2PseudoHeaderRequest(t *testing.T) {
+	dir := t.TempDir()
+	h2 := filepath.Join(dir, "h2_req.http")
+	if err := os.WriteFile(h2, []byte(":method: POST\n:path: /api/users\n:authority: a.test\n:scheme: https\ncontent-type: application/json\n\n{\"a\":1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := filepath.Join(dir, "res.http")
+	if err := os.WriteFile(res, []byte("HTTP/2 201\ncontent-type: application/json\n\n{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []HTTPCmd{
+		{Request: h2, Response: res},
+		{Request: h2},
+		{File: h2},
+	} {
+		c.DryRun, c.JSON = true, true
+		code, rep, _ := runJSON(t, func(r *reporter) int { return runHTTP(&c, r) })
+		if code != exitOK || rep.Panels == nil || rep.Panels.Request == nil {
+			t.Errorf("%+v = %d (%v), want the request rendered", c, code, rep.Error)
+		}
+	}
+	logf := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(logf, []byte("2026-01-01 :method: GET seen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{Request: logf, DryRun: true, JSON: true}, r)
+	})
+	if code != exitInput || rep.Error == nil || !strings.Contains(rep.Error.Message, ":method pseudo header") {
+		t.Errorf("log file as -r = %d (%v), want an input error naming both request forms", code, rep.Error)
+	}
+}
+
 // exec's provenance gets the same scrub: a token in --sh that --redact hides
 // must not survive in source.path, the report command, or the taker:exec
 // chunk embedded in the PNG.

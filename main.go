@@ -605,7 +605,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		// an input error; a request with no response gets a warning.
 		switch {
 		case reqSrc != nil && !looksHTTPStart(reqSrc) && resSrc == nil:
-			rep.helpf("-f expects a request and/or response capture (status line 'HTTP/...')")
+			rep.helpf("-f expects a request and/or response capture (request line 'METHOD target HTTP/...' or ':method:', status line 'HTTP/...')")
 			return rep.fail(exitInput, kindInput, "%s does not look like an HTTP capture", cmd.File)
 		case resSrc == nil:
 			rep.warn("%s has no response section — rendering the request alone", cmd.File)
@@ -643,7 +643,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	}
 	if cmd.File == "" {
 		if reqSrc != nil && !looksHTTPRequest(reqSrc) {
-			return rep.fail(exitInput, kindInput, "%s does not look like an HTTP request (start line 'METHOD target HTTP/...')", cmd.Request)
+			return rep.fail(exitInput, kindInput, "%s does not look like an HTTP request (start line 'METHOD target HTTP/...' or an HTTP/2 :method pseudo header)", cmd.Request)
 		}
 		if resSrc != nil && !looksHTTPResponse(resSrc) {
 			return rep.fail(exitInput, kindInput, "%s does not look like an HTTP response (status line 'HTTP/...')", cmd.Response)
@@ -814,6 +814,12 @@ func splitCapture(src []byte) (req, res []byte) {
 // file handed to -f cannot pass for a capture.
 var httpStartRe = regexp.MustCompile(`^[A-Za-z]+\s+\S+\s+HTTP/`)
 
+// h2RequestRe is the first line of an HTTP/2 request in pseudo-header form
+// (what browsers' DevTools and HTTP/2 proxies copy): it has no request line
+// and opens straight into :method, :path, :authority or :scheme. The
+// renderer draws that form; refusing it here was the only thing in the way.
+var h2RequestRe = regexp.MustCompile(`(?i)^:(method|authority|scheme|path):`)
+
 func looksHTTPStart(src []byte) bool {
 	return looksHTTPResponse(src) || looksHTTPRequest(src)
 }
@@ -823,7 +829,8 @@ func looksHTTPResponse(src []byte) bool {
 }
 
 func looksHTTPRequest(src []byte) bool {
-	return httpStartRe.MatchString(startLine(src))
+	first := startLine(src)
+	return httpStartRe.MatchString(first) || h2RequestRe.MatchString(first)
 }
 
 func startLine(src []byte) string {
