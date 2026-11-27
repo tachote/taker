@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -245,7 +246,10 @@ func toonNeedsQuote(s string) bool {
 	case "true", "false", "null", "-":
 		return true
 	}
-	if _, err := strconv.ParseFloat(s, 64); err == nil {
+	// A value out of float64 range (1e999) is still numeric syntax: ParseFloat
+	// reports ErrRange for it, and a decoder would read it as a number all
+	// the same.
+	if _, err := strconv.ParseFloat(s, 64); err == nil || errors.Is(err, strconv.ErrRange) {
 		return true
 	}
 	return false

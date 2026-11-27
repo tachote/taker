@@ -516,7 +516,7 @@ func (r *reporter) emit(code int) int {
 			r.note("could not encode the toon report: %v", err)
 			return code
 		}
-		fmt.Fprintln(r.out, text)
+		fmt.Fprint(r.out, text) // every TOON line already ends in a newline
 	}
 	return code
 }

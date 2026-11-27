@@ -234,3 +234,33 @@ func TestStdinHasData(t *testing.T) {
 		t.Error("the probe should not block on an empty pipe")
 	}
 }
+
+// A string a TOON decoder would read as a number has to be quoted, including
+// one too large for a float64: "1e999" is still numeric syntax, and an
+// unquoted --mark 1e999 came back as a number instead of the needle.
+func TestTOONQuotesNumericLookingStrings(t *testing.T) {
+	for _, s := range []string{"1e999", "-1e999", "007", "42", "3.14", "1E5"} {
+		if got := toonStr(s); got != `"`+s+`"` {
+			t.Errorf("toonStr(%q) = %s, want it quoted", s, got)
+		}
+	}
+	for _, s := range []string{"os.system", "v1.2.3", "e999", "1e"} {
+		if got := toonStr(s); got != s {
+			t.Errorf("toonStr(%q) = %s, want it bare", s, got)
+		}
+	}
+}
+
+// The document already ends every line with a newline; emit must not add a
+// second one — a trailing blank line is an extra empty record to a reader
+// that splits on lines.
+func TestTOONEndsWithOneNewline(t *testing.T) {
+	rep := newReporter("toon", "snap")
+	got := ""
+	rep.out = &stringsWriter{&got}
+	rep.rep.OK = true
+	rep.emit(exitOK)
+	if !strings.HasSuffix(got, "\n") || strings.HasSuffix(got, "\n\n") {
+		t.Errorf("toon document should end in exactly one newline: %q", got[max(0, len(got)-12):])
+	}
+}
