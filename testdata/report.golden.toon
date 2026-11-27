@@ -20,7 +20,7 @@ crop:
 sha256[1]{name,sum}:
   source,0f8a5059d7644ac9e04ace0126e30d668b32a67f5aead4ce8a2f401d1d01a956
 redactions: 3
-marks[2]{needle,matches,lines,kept,dropped}:
-  db.query,1,1,1,0
-  nowhere,0,0,0,0
+marks[2]{needle,matches,lines,kept,dropped,shown}:
+  db.query,1,1,1,0,1
+  nowhere,0,0,0,0,0
 warnings[1]: "--mark \"nowhere\" matched nothing"

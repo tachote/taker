@@ -116,15 +116,19 @@ type Panels struct {
 	Response *Crop `json:"response,omitempty"`
 }
 
-// MarkReport is one --mark literal's outcome. Kept and Dropped are what the
-// image shows versus what a limit left out, so a caller can tell a mark that
-// landed where it wanted from one that only half landed.
+// MarkReport is one --mark literal's outcome, counted over the whole input.
+// Kept and Dropped split the matches by --max-marks: the ones it kept versus
+// the ones it left out. Shown is how many kept matches sit on a line the image
+// shows — a --lines or --context trim can leave a kept match out of the view,
+// and kept=1 with no box in the image is the claim a consumer must not trust.
+// It comes last so a TOON table's existing columns keep their positions.
 type MarkReport struct {
 	Needle  string `json:"needle"`
 	Matches int    `json:"matches"`
 	Lines   int    `json:"lines"`
 	Kept    int    `json:"kept"`
 	Dropped int    `json:"dropped"`
+	Shown   int    `json:"shown"`
 }
 
 // ExecReport records the child command's outcome for `taker exec` — the
@@ -668,6 +672,17 @@ func recordMarks(rep *reporter, stats []highlight.MarkStats) {
 		})
 		if st.Dropped > 0 {
 			rep.helpf("raise --max-marks or narrow %q to box the %d matches left out", st.Literal, st.Dropped)
+		}
+	}
+}
+
+// markShown fills marks[].shown once the view is known. recordMarks runs
+// before the trim — --context centers on its matches — so the entries it
+// appended from base on get their shown counts here, in the same order.
+func markShown(rep *reporter, base int, stats []highlight.MarkStats, shown func(i int, st highlight.MarkStats) int) {
+	for i, st := range stats {
+		if base+i < len(rep.rep.Marks) {
+			rep.rep.Marks[base+i].Shown = shown(i, st)
 		}
 	}
 }

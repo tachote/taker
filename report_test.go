@@ -1120,3 +1120,52 @@ func TestReportGolden(t *testing.T) {
 		}
 	}
 }
+
+// kept counts the whole input; shown counts what the image boxes. A trim that
+// leaves the only match outside the view used to report kept=1 on an image
+// with no mark at all.
+func TestMarkShownCountsOnlyTheView(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.py")
+	if err := os.WriteFile(file, []byte("import os\nx = 1\ny = 2\nimport re\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		lines string
+		shown int
+	}{{"2-3", 0}, {"3-4", 1}, {"", 2}} {
+		_, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Lines: tc.lines, Mark: []string{"import"}, DryRun: true, JSON: true}), r)
+		})
+		if len(rep.Marks) != 1 || rep.Marks[0].Kept != 2 || rep.Marks[0].Shown != tc.shown {
+			t.Errorf("--lines %q: marks = %+v, want kept 2, shown %d", tc.lines, rep.Marks, tc.shown)
+		}
+	}
+
+	// http: each panel is trimmed on its own, and a lone response is the
+	// renderer's message 0.
+	req := filepath.Join(dir, "r.http")
+	res := filepath.Join(dir, "s.http")
+	if err := os.WriteFile(req, []byte("GET /a HTTP/1.1\r\nHost: x.test\r\nX-A: import\r\n\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(res, []byte("HTTP/1.1 200 OK\r\nX: import\r\n\r\nimport\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cmd   HTTPCmd
+		kept  int
+		shown int
+	}{
+		{HTTPCmd{Request: req, Response: res, ReqLines: "1-2"}, 3, 2},
+		{HTTPCmd{Request: req, Response: res}, 3, 3},
+		{HTTPCmd{Response: res, ResLines: "1"}, 2, 0},
+	} {
+		c := tc.cmd
+		c.Mark, c.DryRun, c.JSON = []string{"import"}, true, true
+		_, rep, _ := runJSON(t, func(r *reporter) int { return runHTTP(&c, r) })
+		if len(rep.Marks) != 1 || rep.Marks[0].Kept != tc.kept || rep.Marks[0].Shown != tc.shown {
+			t.Errorf("%+v: marks = %+v, want kept %d, shown %d", tc.cmd, rep.Marks, tc.kept, tc.shown)
+		}
+	}
+}

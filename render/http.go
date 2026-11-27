@@ -602,6 +602,10 @@ type HTTPFacts struct {
 	Request  PanelFacts
 	Response PanelFacts
 	Marks    []highlight.MarkStats
+	// Shown is, per Marks entry, how many kept occurrences sit on a line the
+	// trimmed panels still show — what the image boxes, not what the
+	// capture holds.
+	Shown    []int
 	Redacted int // black boxes drawn across both panels
 }
 
@@ -777,6 +781,19 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 			cfg.Facts.Response = PanelFacts{ViewExtent: highlight.Extent(resLines), Total: totalRes, Present: true}
 		}
 		cfg.Facts.Marks = stats
+		// Indexed like msgs: a lone response is message 0.
+		var views [][]highlight.LineTokens
+		for _, side := range sideOf {
+			if side == 0 {
+				views = append(views, reqLines)
+			} else {
+				views = append(views, resLines)
+			}
+		}
+		cfg.Facts.Shown = make([]int, len(stats))
+		for i, st := range stats {
+			cfg.Facts.Shown[i] = st.Shown(views...)
+		}
 	}
 
 	// Tabs read the whole capture, not the trimmed view: in Burp an editor tab

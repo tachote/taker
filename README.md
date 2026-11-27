@@ -393,8 +393,8 @@ crop:
   last: 76
   shown: 11
   total: 120
-marks[1]{needle,matches,lines,kept,dropped}:
-  os.system,1,1,1,0
+marks[1]{needle,matches,lines,kept,dropped,shown}:
+  os.system,1,1,1,0,1
 sha256[1]{name,sum}:
   source,b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9
 warnings[0]:
@@ -424,7 +424,7 @@ $ taker snap src/auth.py --first-line 70 -m os.system -c 5 --json -o auth.png
   "height": 293,
   "source": { "kind": "file", "path": "src/auth.py" },
   "crop": { "first": 70, "last": 71, "shown": 2, "total": null },
-  "marks": [ { "needle": "os.system", "matches": 1, "lines": 1, "kept": 1, "dropped": 0 } ],
+  "marks": [ { "needle": "os.system", "matches": 1, "lines": 1, "kept": 1, "dropped": 0, "shown": 1 } ],
   "sha256": [ { "name": "source", "sha256": "b94d…" } ],
   "redactions": 0,
   "dry_run": false,
@@ -454,8 +454,11 @@ shows, in the source's own numbering, and its `total` is `null` when the input d
 not start at line 1 — an excerpt's real length is not something taker knows, and a
 wrong total is worse than none. `panels` carries one `crop` per pane that exists
 in `taker http` — an absent pane is `null`, not a zero crop. `marks` reports, per
-literal or pattern, how many matches were boxed (`kept`) and how many a limit left
-out (`dropped`). `sha256` fingerprints every input that fed the image (`source`,
+literal or pattern, over the whole input: how many matches `--max-marks` kept
+(`kept`) and left out (`dropped`), and how many kept matches sit on a line the
+image shows (`shown`) — a `--lines`/`--context`/`--nr`/`--ns` trim can leave a
+kept match out of the view, so assert on `shown`, not `kept`, to know a box is
+in the image. `sha256` fingerprints every input that fed the image (`source`,
 `request`, `response`, `transcript`), and `command`/`generated` record the exact
 invocation (shell-quoted so it replays, with the binary's base name instead of
 its path) and its UTC time — the same provenance the PNG itself embeds as `tEXt`

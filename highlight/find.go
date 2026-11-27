@@ -52,6 +52,32 @@ func (s MarkStats) KeptLines(msg int) []int {
 	return out
 }
 
+// Shown counts the kept occurrences whose line is in the view of their
+// message; views[i] is what message i renders, gaps included or not. Kept
+// counts the whole input, so a --lines or --context trim can leave a kept
+// match out of the image — Shown is the number the image really boxes.
+func (s MarkStats) Shown(views ...[]LineTokens) int {
+	in := make([]map[int]bool, len(views))
+	n := 0
+	for _, k := range s.Kept {
+		if k.Message < 0 || k.Message >= len(views) {
+			continue
+		}
+		if in[k.Message] == nil {
+			in[k.Message] = map[int]bool{}
+			for _, lt := range views[k.Message] {
+				if !lt.IsGap {
+					in[k.Message][lt.LineNum] = true
+				}
+			}
+		}
+		if in[k.Message][k.Line] {
+			n++
+		}
+	}
+	return n
+}
+
 func (s MarkStats) flag() string {
 	if s.Flag != "" {
 		return s.Flag

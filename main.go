@@ -438,6 +438,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	marked, stats := highlight.FindMarks(msgs, cmd.Mark, cmd.MaxMarks)
 	reMarked, reStats := highlight.FindRegexMarks(msgs, markRe, cmd.MaxMarks)
 	stats = append(stats, reStats...)
+	markBase := len(rep.rep.Marks)
 	recordMarks(rep, stats)
 	// Normalized: -H and -m hitting the same value ("-H 1:10-16 -m sk_live")
 	// otherwise drew nested boxes whose inner border split one value in two.
@@ -509,6 +510,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		rep.helpf("widen --lines/--first-line or drop --highlight/--mark so some lines remain")
 		return rep.fail(exitRefused, kindRefused, "no lines matched (file has %d lines)", len(all))
 	}
+	markShown(rep, markBase, stats, func(_ int, st highlight.MarkStats) int { return st.Shown(lines) })
 
 	// Only a file read from its first line has a known length. For an excerpt
 	// the tool has no idea how long the real file is, and a wrong total is
@@ -754,7 +756,15 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitRefused, kindRefused, "render: %v", err)
 	}
+	base := len(rep.rep.Marks)
 	recordMarks(rep, facts.Marks)
+	// The renderer trimmed the panels, so it counted what each one shows.
+	markShown(rep, base, facts.Marks, func(i int, _ highlight.MarkStats) int {
+		if i < len(facts.Shown) {
+			return facts.Shown[i]
+		}
+		return 0
+	})
 	rep.rep.Source = &Source{Kind: "http", Path: srcPath}
 	rep.scrubSecrets()
 	rep.rep.Redactions = facts.Redacted
@@ -959,7 +969,12 @@ func termMarks(lines []highlight.LineTokens, needles []string, res []*regexp.Reg
 	msgs := [][]highlight.LineTokens{lines}
 	m1, s1 := highlight.FindMarks(msgs, needles, maxMarks)
 	m2, s2 := highlight.FindRegexMarks(msgs, res, maxMarks)
-	recordMarks(rep, append(s1, s2...))
+	stats := append(s1, s2...)
+	base := len(rep.rep.Marks)
+	recordMarks(rep, stats)
+	// A transcript renders every line, so this equals kept today; counted off
+	// the view anyway, so a future trim cannot make the report overclaim.
+	markShown(rep, base, stats, func(_ int, st highlight.MarkStats) int { return st.Shown(lines) })
 	// Two needles on one value draw one box, not nested ones.
 	return m1[0].Merge(m2[0]).Normalize()
 }

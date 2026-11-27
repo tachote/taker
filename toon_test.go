@@ -23,8 +23,8 @@ func TestReportTOONEncoding(t *testing.T) {
 	total := 68
 	rep.rep.Crop = &Crop{First: 3, Last: 19, Shown: 14, Total: &total}
 	rep.rep.Marks = []MarkReport{
-		{Needle: "os.system", Matches: 4, Lines: 4, Kept: 4, Dropped: 0},
-		{Needle: "sha256", Matches: 1, Lines: 1, Kept: 1, Dropped: 0},
+		{Needle: "os.system", Matches: 4, Lines: 4, Kept: 4, Dropped: 0, Shown: 3},
+		{Needle: "sha256", Matches: 1, Lines: 1, Kept: 1, Dropped: 0, Shown: 1},
 	}
 	rep.rep.SHA256 = []SourceHash{{Name: "source", Sum: "b94d"}}
 	rep.rep.Warnings = []string{"--mark fell outside the view"}
@@ -39,7 +39,7 @@ func TestReportTOONEncoding(t *testing.T) {
 		"tool: taker\n",
 		"ok: true\n",
 		// Tables collapse repeated keys — the point of the format.
-		"marks[2]{needle,matches,lines,kept,dropped}:\n  os.system,4,4,4,0\n  sha256,1,1,1,0\n",
+		"marks[2]{needle,matches,lines,kept,dropped,shown}:\n  os.system,4,4,4,0,3\n  sha256,1,1,1,0,1\n",
 		"sha256[1]{name,sum}:\n  source,b94d\n",
 		// Nested objects indent under their key.
 		"source:\n  kind: file\n  path: src/a.go\n",
