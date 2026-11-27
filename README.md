@@ -315,7 +315,7 @@ The prompt line is the argv shell-quoted, so it pastes back as the same command 
 | `--mark` | `-m` | — | Highlight every occurrence of this text in the output; a comma is part of it. Repeat `-m` for more |
 | `--mark-re` | | — | Highlight every regex match. Repeatable |
 | `--max-marks` | | 0 (all) | Keep at most N matches per `--mark` literal |
-| `--redact` / `--redact-re` / `--redact-keep` | | — | Mask the output the same way as code evidence; the masking also covers the prompt line and the recorded command. A needle that shell-quoting would split in the prompt line (one holding both `'` and one of `"`, `$`, a backtick, `\` or `!`) is refused (exit 2); use `--sh` |
+| `--redact` / `--redact-re` / `--redact-keep` | | — | Mask the output the same way as code evidence; the masking also covers the prompt line and the recorded command. A needle that shell-quoting would split in the prompt line (one holding both `'` and one of `"`, `$`, a backtick, `\` or `!`) is refused (exit 2); use `--sh`. So is a `--redact-re` that matches a word of the command but not the drawn line `$ <command>`, such as one anchored with `^` or `$`; anchor on `\b` instead |
 | `--wrap-width` | | 80 | Columns per row before output wraps (minimum 20) |
 | `--theme` | `-T` | `vscode-dark` | Color theme (`burp` is refused) |
 | `--title` | `-t` | `Terminal` | Title shown in the window bar |

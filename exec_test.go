@@ -195,6 +195,32 @@ func TestExecRedactHoldingAQuote(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "p.png")); err == nil {
 		t.Error("a refused run wrote an image")
 	}
+
+	// An anchored pattern matches the word alone but not the drawn line
+	// "$ echo tok_abc123": the record said <redacted> while the image showed
+	// the value. Both the argv and the --sh forms are refused.
+	for i, form := range [][]string{
+		{"--", "echo", "tok_abc123"},
+		{"--sh", "tok_abc123=1; echo hi"},
+	} {
+		img := fmt.Sprintf("anc%d.png", i)
+		args := append([]string{"exec", "--json", "-o", img, "--redact-re", "^tok_[a-z0-9]+$|^tok_[a-z0-9]+="}, form...)
+		code, stdout, stderr = runTaker(t, dir, args...)
+		if code != exitUsage {
+			t.Fatalf("anchored %v: exit = %d, want %d\n%s", form, code, exitUsage, stdout)
+		}
+		if strings.Contains(stdout+stderr, "abc123") {
+			t.Errorf("anchored %v: the refused value leaked:\n%s\n%s", form, stdout, stderr)
+		}
+		if _, err := os.Stat(filepath.Join(dir, img)); err == nil {
+			t.Errorf("anchored %v: a refused run wrote an image", form)
+		}
+	}
+	// Anchored on a word boundary, the same value is boxed in the prompt.
+	code, stdout, stderr = runTaker(t, dir, "exec", "--json", "-o", "b.png", "--redact-re", `\btok_[a-z0-9]+\b`, "--", "echo", "tok_abc123")
+	if code != exitOK || strings.Contains(stdout+stderr, "abc123") {
+		t.Errorf("word-boundary pattern: exit = %d\n%s\n%s", code, stdout, stderr)
+	}
 }
 
 func execCmd(c ExecCmd) *ExecCmd {

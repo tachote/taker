@@ -1513,29 +1513,49 @@ var execFlagNames = sync.OnceValue(func() map[string]bool {
 	return names
 })
 
-// splitNeedle names a redact needle that the prompt line's quoting breaks
-// apart: one the raw words hold but the quoted line does not. The image finds
-// needles in the drawn text, so a split needle would be drawn in clear —
-// it's$ecret quoted as "it's\$ecret". The quoting rule keeps this to a
-// needle that holds both a ' and one of " $ ` \ !.
-func splitNeedle(raw, quoted string, lits []string, res, frags []*regexp.Regexp) string {
+// splitNeedle names a redact needle that the command's words hold but the
+// drawn prompt line does not show where the image's matcher can find it.
+// Two things break a needle there. Quoting: it's$ecret is drawn as
+// "it's\$ecret", and the quoting rule keeps this to a needle that holds both
+// a ' and one of " $ ` \ !. Context: a pattern anchored with ^ or $ matches
+// a word alone, but the drawn line starts with "$ " and holds the other words
+// too. A pattern's match in a word counts as shown only when one of the
+// pattern's own matches on a prompt line holds it — a plain substring test
+// would pass the anchored value the image leaves in clear.
+func splitNeedle(words []string, prompt string, lits []string, res, frags []*regexp.Regexp) string {
+	raw := strings.Join(words, " ")
 	for i, l := range lits {
-		if l != "" && strings.Contains(raw, l) && !strings.Contains(quoted, l) {
+		if l != "" && strings.Contains(raw, l) && !strings.Contains(prompt, l) {
 			return fmt.Sprintf("--redact #%d", i+1)
 		}
 	}
-	for i, re := range res {
-		for _, m := range re.FindAllString(raw, -1) {
-			if m != "" && !strings.Contains(quoted, m) {
-				return fmt.Sprintf("--redact-re #%d", i+1)
+	// The image matches each line on its own, and a quoted word can hold a
+	// newline.
+	lines := strings.Split(prompt, "\n")
+	hidden := func(re *regexp.Regexp) bool {
+		var shown []string
+		for _, ln := range lines {
+			shown = append(shown, re.FindAllString(ln, -1)...)
+		}
+		found := re.FindAllString(raw, -1)
+		for _, w := range words {
+			found = append(found, re.FindAllString(w, -1)...)
+		}
+		for _, m := range found {
+			if m != "" && !slices.ContainsFunc(shown, func(s string) bool { return strings.Contains(s, m) }) {
+				return true
 			}
+		}
+		return false
+	}
+	for i, re := range res {
+		if hidden(re) {
+			return fmt.Sprintf("--redact-re #%d", i+1)
 		}
 	}
 	for _, re := range frags {
-		for _, m := range re.FindAllString(raw, -1) {
-			if !strings.Contains(quoted, m) {
-				return "a part of a --redact value"
-			}
+		if hidden(re) {
+			return "a part of a --redact value"
 		}
 	}
 	return ""
@@ -1870,12 +1890,25 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 		// `grep -c func main a.go` for a search of "func main", a different
 		// command than the one that ran.
 		cmdStr = shellQuote(argv)
-		if what := splitNeedle(strings.Join(argv, " "), cmdStr, cmd.Redact, redactRe, rep.redactFragRes(cmd.RedactKeep)); what != "" {
-			rep.helpf("taker exec --sh '<command line>' shows the line as typed")
-			return rep.fail(exitUsage, kindUsage,
-				"quoting the prompt line splits %s, so the image could not hide it", what)
-		}
 		provStr = rep.quoteScrubbed(argv)
+	}
+	// The record masks each word of the command on its own; the image finds
+	// needles in the drawn prompt line. A value one matches and the other
+	// does not would read <redacted> in the report and stand in clear in
+	// the image, so the run stops instead.
+	words := argv
+	if cmd.Shell != "" {
+		words = []string{cmd.Shell}
+	}
+	if what := splitNeedle(words, "$ "+cmdStr, cmd.Redact, redactRe, rep.redactFragRes(cmd.RedactKeep)); what != "" {
+		if cmd.Shell == "" {
+			rep.helpf("taker exec --sh '<command line>' shows the line as typed")
+		}
+		if strings.HasPrefix(what, "--redact-re") {
+			rep.helpf("a --redact-re anchored with ^ or $ matches a word alone but not the prompt line '$ <command>'; anchor on \\b instead")
+		}
+		return rep.fail(exitUsage, kindUsage,
+			"the prompt line does not show %s the way the command's words do (its quoting or its context changes the match), so the image could not hide it", what)
 	}
 	if provStr == "" {
 		provStr = rep.scrubMeta(cmdStr)
