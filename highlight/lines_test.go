@@ -568,3 +568,59 @@ func TestMarksNormalize(t *testing.T) {
 		t.Errorf("nil Normalize = %v, want nil", got)
 	}
 }
+
+// A tab moves to the next tab stop; it is not a fixed run of spaces. With a
+// fixed run, "#define A\t1" and "#define XY\t333" land their values in
+// different columns although every editor and terminal lines them up. The
+// column carries across tokens and resets on each line.
+func TestTokenizeTabStops(t *testing.T) {
+	src := "#define A\t1\t/* one */\n#define XY\t333\t/* three */\n\tindent\n"
+	lines, err := Tokenize(src, "c", "tabs.c", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"#define A   1   /* one */",
+		"#define XY  333 /* three */",
+		"    indent",
+	}
+	for i, w := range want {
+		if got := lines[i].Text(); got != w {
+			t.Errorf("width 4, line %d = %q, want %q", i+1, got, w)
+		}
+	}
+
+	// A terminal transcript uses 8, like the terminal that printed it.
+	lines, err = TokenizeTabs("KEY\tVALUE\nAPI_TOKEN\tsecret\nñ\tx\n", "text", "", nil, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"KEY     VALUE", "API_TOKEN       secret", "ñ       x"}
+	for i, w := range want {
+		if got := lines[i].Text(); got != w {
+			t.Errorf("width 8, line %d = %q, want %q", i+1, got, w)
+		}
+	}
+}
+
+// A pasted needle still holds the tab, while the drawn text holds the spaces
+// it expanded to — however many that was at that column.
+func TestFindMarksMatchesTabNeedle(t *testing.T) {
+	lines, err := TokenizeTabs("KEY\tVALUE\nAPI_TOKEN\tsecret\n", "text", "", nil, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, stats := FindMarks([][]LineTokens{lines}, []string{"API_TOKEN\tsecret", "KEY\tVALUE"}, 0)
+	if stats[0].Matches != 1 || stats[1].Matches != 1 {
+		t.Fatalf("stats = %+v, want one match each", stats)
+	}
+	if got := found[0][2]; len(got) != 1 || got[0] != (Span{Start: 1, End: 22}) {
+		t.Errorf("API_TOKEN\\tsecret = %v, want {1 22}", got)
+	}
+	if got := found[0][1]; len(got) != 1 || got[0] != (Span{Start: 1, End: 13}) {
+		t.Errorf("KEY\\tVALUE = %v, want {1 13}", got)
+	}
+	if stats[0].Literal != "API_TOKEN\tsecret" || stats[0].Flag != "--mark" {
+		t.Errorf("stats name the needle as given: %+v", stats[0])
+	}
+}

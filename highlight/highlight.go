@@ -26,7 +26,18 @@ type LineTokens struct {
 
 // Tokenize tokenizes src and returns one LineTokens per source line.
 // lang may be empty for auto-detection. filename is used for extension-based detection.
+// Tabs stop every 4 columns, the VS Code default for code.
 func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, error) {
+	return TokenizeTabs(src, lang, filename, style, 4)
+}
+
+// TokenizeTabs is Tokenize with tab stops every tabWidth columns (<= 0 means
+// 4). A terminal transcript wants 8: that is where the terminal that printed
+// it put the stops, and a table it aligned has to stay aligned in the image.
+func TokenizeTabs(src, lang, filename string, style *chroma.Style, tabWidth int) ([]LineTokens, error) {
+	if tabWidth <= 0 {
+		tabWidth = 4
+	}
 	lexer := chroma.Coalesce(pickLexer(src, lang, filename))
 
 	if style == nil {
@@ -45,9 +56,10 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 
 	var lines []LineTokens
 	current := LineTokens{LineNum: 1}
+	col := 0 // runes drawn so far on the current line, for tab stops
 
 	for tok := it(); tok != chroma.EOF; tok = it() {
-		text := expandTabs(tok.Value, 4)
+		text := tok.Value
 		entry := style.Get(tok.Type)
 		r, g, b := fr, fg, fb
 		if entry.Colour.IsSet() {
@@ -59,10 +71,12 @@ func Tokenize(src, lang, filename string, style *chroma.Style) ([]LineTokens, er
 			if i > 0 {
 				lines = append(lines, current)
 				current = LineTokens{LineNum: current.LineNum + 1}
+				col = 0
 			}
 			// A CRLF capture leaves \r on every part: it draws as a blank
 			// glyph that pads the row and inflates the column count.
 			part = strings.TrimSuffix(part, "\r")
+			part, col = expandTabs(part, col, tabWidth)
 			if part != "" {
 				current.Tokens = append(current.Tokens, Token{Text: part, R: r, G: g, B: b})
 			}
@@ -141,8 +155,8 @@ func InvalidUTF8(src string) (count, firstLine int) {
 	return count, firstLine
 }
 
-// Text is the plain text of the line, with tabs already expanded, so column
-// numbers taken from it line up with what gets drawn.
+// Text is the plain text of the line, with tabs already expanded to their tab
+// stops, so column numbers taken from it line up with what gets drawn.
 func (lt LineTokens) Text() string {
 	var b strings.Builder
 	for _, tok := range lt.Tokens {
@@ -298,8 +312,28 @@ func FilterLines(all []LineTokens, spec []int) []LineTokens {
 	return result
 }
 
-func expandTabs(s string, tabWidth int) string {
-	return strings.ReplaceAll(s, "\t", strings.Repeat(" ", tabWidth))
+// expandTabs replaces each tab in s, which starts at column col of its line,
+// with spaces up to the next multiple of tabWidth, and returns the column after
+// it. The column is counted in runes, the unit spans and the renderer use; a
+// fixed run of spaces instead pushed "#define XY\t333" and "#define A\t1" to
+// different columns although every editor aligns them.
+func expandTabs(s string, col, tabWidth int) (string, int) {
+	if !strings.Contains(s, "\t") {
+		return s, col + utf8.RuneCountInString(s)
+	}
+	var b strings.Builder
+	b.Grow(len(s) + tabWidth)
+	for _, r := range s {
+		if r == '\t' {
+			n := tabWidth - col%tabWidth
+			b.WriteString(strings.Repeat(" ", n))
+			col += n
+			continue
+		}
+		b.WriteRune(r)
+		col++
+	}
+	return b.String(), col
 }
 
 // defaultText is the colour for a token the style leaves uncoloured. Style.Get

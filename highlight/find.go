@@ -3,6 +3,7 @@ package highlight
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -83,17 +84,23 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 		}
 		seen[needle] = true
 		st := MarkStats{Literal: needle, Flag: "--mark"}
-		// The token text has tabs expanded to four spaces — a needle that
-		// still holds a literal tab can never match what the reader sees.
-		needle = expandTabs(needle, 4)
+		// The token text has tabs expanded to their tab stops, so a needle
+		// that still holds a literal tab can never match what the reader sees,
+		// and no fixed run of spaces stands for it either: how many a tab
+		// became depends on its column. Each tab matches a run of spaces.
+		find := func(msg []LineTokens) Marks { return FindLiteral(msg, needle) }
+		if strings.Contains(needle, "\t") {
+			re := tabNeedle(needle)
+			find = func(msg []LineTokens) Marks { return findRegex(msg, re) }
+		}
 
-		// Collect in message-then-line order: FindLiteral returns a map, and
+		// Collect in message-then-line order: the finders return a map, and
 		// "the first 5 matches" has to mean the earliest ones a reader would
 		// find scrolling down the image.
 		var hits []ScopedSpan
 		lines := map[[2]int]bool{}
 		for mi, msg := range messages {
-			found := FindLiteral(msg, needle)
+			found := find(msg)
 			for _, ln := range found.Lines() {
 				lines[[2]int{mi, ln}] = true
 				for _, sp := range found[ln] {
@@ -135,27 +142,11 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 		var hits []ScopedSpan
 		lines := map[[2]int]bool{}
 		for mi, msg := range messages {
-			for _, lt := range msg {
-				if lt.IsGap {
-					continue
-				}
-				text := lt.Text()
-				// Matches come in order and never overlap, so the column is
-				// carried forward from the previous match instead of being
-				// recounted from column 1: that recount made a one-line JSON
-				// body quadratic in its length.
-				prev, col := 0, 0
-				for _, loc := range re.FindAllStringIndex(text, -1) {
-					if loc[0] == loc[1] {
-						continue
-					}
-					col += utf8.RuneCountInString(text[prev:loc[0]])
-					start := col + 1
-					col += utf8.RuneCountInString(text[loc[0]:loc[1]])
-					end := col
-					prev = loc[1]
-					hits = append(hits, ScopedSpan{Message: mi, Line: lt.LineNum, Span: Span{Start: start, End: end}})
-					lines[[2]int{mi, lt.LineNum}] = true
+			found := findRegex(msg, re)
+			for _, ln := range found.Lines() {
+				lines[[2]int{mi, ln}] = true
+				for _, sp := range found[ln] {
+					hits = append(hits, ScopedSpan{Message: mi, Line: ln, Span: sp})
 				}
 			}
 		}
@@ -174,6 +165,45 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 		stats = append(stats, st)
 	}
 	return out, stats
+}
+
+// findRegex returns every non-empty match of re on the given lines, in rune
+// columns. Matches come in order and never overlap, so the column is carried
+// forward from the previous match instead of being recounted from column 1:
+// that recount made a one-line JSON body quadratic in its length.
+func findRegex(lines []LineTokens, re *regexp.Regexp) Marks {
+	var found Marks
+	for _, lt := range lines {
+		if lt.IsGap {
+			continue
+		}
+		text := lt.Text()
+		prev, col := 0, 0
+		for _, loc := range re.FindAllStringIndex(text, -1) {
+			if loc[0] == loc[1] {
+				continue
+			}
+			col += utf8.RuneCountInString(text[prev:loc[0]])
+			start := col + 1
+			col += utf8.RuneCountInString(text[loc[0]:loc[1]])
+			prev = loc[1]
+			if found == nil {
+				found = Marks{}
+			}
+			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: start, End: col})
+		}
+	}
+	return found
+}
+
+// tabNeedle compiles a literal needle that holds tabs into a pattern where
+// each tab matches the run of spaces it became when the text was expanded.
+func tabNeedle(needle string) *regexp.Regexp {
+	parts := strings.Split(needle, "\t")
+	for i, p := range parts {
+		parts[i] = regexp.QuoteMeta(p)
+	}
+	return regexp.MustCompile(strings.Join(parts, " +"))
 }
 
 // KeepSpans shifts every span's start right by n, so a redaction can leave the
