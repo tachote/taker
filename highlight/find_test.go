@@ -203,3 +203,26 @@ func TestFindRegexMarksRunningColumns(t *testing.T) {
 		t.Errorf("spans = %v, want %v", got[0][1], want)
 	}
 }
+
+// Matches counts the whole input; the positions of the kept ones are what
+// lets the caller say how many a trimmed view actually shows.
+func TestMarkStatsKept(t *testing.T) {
+	req := linesOf("GET /a?t=abc HTTP/1.1", "Host: x")
+	res := linesOf("HTTP/1.1 200", "abc abc", "abc-3")
+	_, stats := FindMarks([][]LineTokens{req, res}, []string{"abc"}, 3)
+	st := stats[0]
+	if len(st.Kept) != 3 || st.Matches != 4 || st.Dropped != 1 {
+		t.Fatalf("stats = %+v, want 3 kept of 4", st)
+	}
+	if got := st.KeptLines(0); !reflect.DeepEqual(got, []int{1}) {
+		t.Errorf("request lines = %v, want [1]", got)
+	}
+	if got := st.KeptLines(1); !reflect.DeepEqual(got, []int{2, 2}) {
+		t.Errorf("response lines = %v, want [2 2] (one per occurrence)", got)
+	}
+
+	_, rstats := FindRegexMarks([][]LineTokens{res}, []*regexp.Regexp{regexp.MustCompile("abc")}, 0)
+	if got := rstats[0].KeptLines(0); !reflect.DeepEqual(got, []int{2, 2, 3}) {
+		t.Errorf("regex kept lines = %v, want [2 2 3]", got)
+	}
+}

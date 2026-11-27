@@ -33,6 +33,23 @@ type MarkStats struct {
 	Matches int    // occurrences across every message
 	Lines   int    // distinct lines carrying at least one occurrence
 	Dropped int    // occurrences a limit left out
+	// Kept is every occurrence the limit kept, earliest first. Matches counts
+	// the whole input, and a view trimmed by --lines or --context can show
+	// fewer: the caller needs the positions to say how many are really in
+	// the image.
+	Kept []ScopedSpan
+}
+
+// KeptLines returns the line of each kept occurrence in message msg, earliest
+// first; a line appears once per occurrence on it.
+func (s MarkStats) KeptLines(msg int) []int {
+	var out []int
+	for _, k := range s.Kept {
+		if k.Message == msg {
+			out = append(out, k.Line)
+		}
+	}
+	return out
 }
 
 func (s MarkStats) flag() string {
@@ -114,6 +131,7 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 			st.Dropped = len(hits) - limit
 			hits = hits[:limit]
 		}
+		st.Kept = hits
 		for _, h := range hits {
 			if out[h.Message] == nil {
 				out[h.Message] = Marks{}
@@ -156,6 +174,7 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 			st.Dropped = len(hits) - limit
 			hits = hits[:limit]
 		}
+		st.Kept = hits
 		for _, h := range hits {
 			if out[h.Message] == nil {
 				out[h.Message] = Marks{}
