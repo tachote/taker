@@ -102,3 +102,47 @@ func TestExecHashCoversTheNormalizedTranscript(t *testing.T) {
 		t.Errorf("sha256 = %s, want %s (normalized, then masked)", got, want)
 	}
 }
+
+// -o naming an input file renames a PNG over the evidence it was made from.
+// Every mode refuses it, including through a symlink, and the input survives.
+func TestOutputMustNotOverwriteTheInput(t *testing.T) {
+	const req = "GET / HTTP/1.1\nHost: a\n\n"
+	const res = "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nok\n"
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		link  [2]string // symlink name -> target, when set
+		args  []string
+	}{
+		{"http -r", map[string]string{"r.http": req}, [2]string{}, []string{"http", "-r", "r.http", "-o", "r.http"}},
+		{"http -s", map[string]string{"r.http": req, "s.http": res}, [2]string{}, []string{"http", "-r", "r.http", "-s", "s.http", "-o", "s.http"}},
+		{"http -f", map[string]string{"c.http": req + res}, [2]string{}, []string{"http", "-f", "c.http", "-o", "./c.http"}},
+		{"term", map[string]string{"t.log": "$ id\nuid=0\n"}, [2]string{}, []string{"term", "t.log", "-o", "t.log"}},
+		{"snap via symlink", map[string]string{"b.py": "print(1)\n"}, [2]string{"blink.py", "b.py"}, []string{"blink.py", "-o", "b.py"}},
+		{"term via symlink", map[string]string{"t.log": "$ id\n"}, [2]string{"tlink.log", "t.log"}, []string{"term", "tlink.log", "-o", "t.log"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, body := range tc.files {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.link[0] != "" {
+				if err := os.Symlink(tc.link[1], filepath.Join(dir, tc.link[0])); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			}
+			code, stdout, _ := runTaker(t, dir, append(tc.args, "--json")...)
+			if code != exitUsage || !strings.Contains(stdout, "-o must differ from the input file") {
+				t.Errorf("exit = %d, want 2 with the overwrite refusal\n%s", code, stdout)
+			}
+			for name, body := range tc.files {
+				got, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil || string(got) != body {
+					t.Errorf("%s was changed: %q, %v", name, got, err)
+				}
+			}
+		})
+	}
+}

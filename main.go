@@ -525,6 +525,13 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		}
 	}
 	cmd.WrapWidth = clampWrapWidth(cmd.WrapWidth, true, rep)
+	// Every input file is evidence the run must not destroy: -o naming any of
+	// them would rename a PNG over the capture.
+	for _, in := range []string{cmd.Request, cmd.Response, cmd.File} {
+		if in != "" && samePath(cmd.Output, in) {
+			return rep.fail(exitUsage, kindUsage, "-o must differ from the input file — it would overwrite the source")
+		}
+	}
 
 	var reqSrc, resSrc []byte
 	var err error
@@ -1349,6 +1356,9 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "--chrome must be 'editor' or 'window', got %q", cmd.Chrome)
 	}
 	cmd.WrapWidth = clampWrapWidth(cmd.WrapWidth, false, rep)
+	if samePath(cmd.Output, cmd.File) {
+		return rep.fail(exitUsage, kindUsage, "-o must differ from the input file — it would overwrite the source")
+	}
 
 	src, err := os.ReadFile(cmd.File)
 	if err != nil {
@@ -1649,9 +1659,17 @@ func writePNG(img image.Image, path string, rep *reporter) error {
 	return nil
 }
 
-// samePath compares two paths after Abs — `-o` set to the input file would
-// destroy the evidence's source, and a warning does not undo a rename.
+// samePath reports whether two paths name the same file — `-o` set to the
+// input file would destroy the evidence's source, and a warning does not undo
+// a rename. When both exist the file identity decides, so a symlink or a
+// second spelling of the input cannot slip past a string comparison; Abs is
+// the fallback for an output that does not exist yet.
 func samePath(a, b string) bool {
+	if fa, err := os.Stat(a); err == nil {
+		if fb, err := os.Stat(b); err == nil {
+			return os.SameFile(fa, fb)
+		}
+	}
 	aa, ea := filepath.Abs(a)
 	bb, eb := filepath.Abs(b)
 	return ea == nil && eb == nil && aa == bb
