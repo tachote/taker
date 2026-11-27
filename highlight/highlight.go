@@ -1,6 +1,7 @@
 package highlight
 
 import (
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -187,9 +188,14 @@ func FindLiteral(lines []LineTokens, needle string) Marks {
 	return found
 }
 
-// Merge returns the union of m and other. Neither input is modified: RenderHTTP
-// merges literal matches into the caller's highlight map, and a render must not
-// leave the config it was handed different from how it found it.
+// Merge returns the union of m and other. Neither input is modified:
+// RenderHTTP merges literal matches into the caller's highlight map, and a
+// render must not leave the config it was handed different from how it found
+// it.
+//
+// Spans are appended, not unioned: redaction marks go through here too, and
+// the report counts one box per redact needle and fragment. Normalize is the
+// step for highlight marks.
 func (m Marks) Merge(other Marks) Marks {
 	if len(other) == 0 {
 		return m
@@ -202,6 +208,56 @@ func (m Marks) Merge(other Marks) Marks {
 		out[line] = append(out[line], spans...)
 	}
 	return out
+}
+
+// Normalize returns a copy of m whose column spans on each line are sorted and
+// unioned where they overlap or touch. Two needles that hit the same secret
+// ("sk_live" and "sk_live_abcdef") otherwise reach the renderer as nested
+// boxes whose inner border splits one value into what reads as two. A
+// whole-line span is kept as is, once. m is not modified.
+//
+// It is meant for highlight marks just before they are drawn. MarkStats are
+// counted before any merge, so the reported match counts do not change.
+func (m Marks) Normalize() Marks {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(Marks, len(m))
+	for line, spans := range m {
+		out[line] = append([]Span(nil), spans...)
+	}
+	return out.normalizeInPlace()
+}
+
+// normalizeInPlace does Normalize's work on a map whose span slices it owns.
+func (m Marks) normalizeInPlace() Marks {
+	for line, spans := range m {
+		if len(spans) < 2 {
+			continue
+		}
+		sort.Slice(spans, func(i, j int) bool {
+			if spans[i].Start != spans[j].Start {
+				return spans[i].Start < spans[j].Start
+			}
+			return spans[i].End < spans[j].End
+		})
+		out := spans[:0]
+		for _, sp := range spans {
+			if len(out) > 0 {
+				last := &out[len(out)-1]
+				if sp.WholeLine() && last.WholeLine() {
+					continue
+				}
+				if !sp.WholeLine() && !last.WholeLine() && sp.Start <= last.End+1 {
+					last.End = max(last.End, sp.End)
+					continue
+				}
+			}
+			out = append(out, sp)
+		}
+		m[line] = out
+	}
+	return m
 }
 
 // FilterLines applies a LineSpec (with gap sentinels) to the full tokenized lines.

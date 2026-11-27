@@ -544,3 +544,27 @@ func TestInvalidUTF8(t *testing.T) {
 		t.Errorf("rendered text = %q", got)
 	}
 }
+
+// Overlapping marks from different needles reached the renderer as separate
+// boxes, and the nested borders split one secret into what reads as two
+// values. Normalize returns each line's column spans as a union.
+func TestMarksNormalize(t *testing.T) {
+	m := Marks{2: {{Start: 10, End: 25}, {Start: 12, End: 18}, {Start: 26, End: 30}, {Start: 40, End: 41}}, 3: {{}, {}}, 4: nil}
+	got := m.Normalize()
+	want := Marks{2: {{Start: 10, End: 30}, {Start: 40, End: 41}}, 3: {{}}, 4: nil}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+	// The receiver is not touched: it may be the caller's config.
+	if len(m[2]) != 4 || m[2][1] != (Span{Start: 12, End: 18}) {
+		t.Errorf("receiver was modified: %v", m[2])
+	}
+	// A whole-line span stays beside the column spans it shares a line with.
+	if got := (Marks{5: {{Start: 3, End: 4}, {}, {Start: 1, End: 3}}}).Normalize(); !reflect.DeepEqual(got, Marks{5: {{}, {Start: 1, End: 4}}}) {
+		t.Errorf("whole line with columns: got %v", got)
+	}
+	var nilMarks Marks
+	if got := nilMarks.Normalize(); got != nil {
+		t.Errorf("nil Normalize = %v, want nil", got)
+	}
+}
