@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"os"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -296,5 +297,35 @@ func TestTOONEndsWithOneNewline(t *testing.T) {
 	rep.emit(exitOK)
 	if !strings.HasSuffix(got, "\n") || strings.HasSuffix(got, "\n\n") {
 		t.Errorf("toon document should end in exactly one newline: %q", got[max(0, len(got)-12):])
+	}
+}
+
+// An ldflag version wins; otherwise the toolchain's module version, then the
+// commit, so a go install or go build binary no longer stamps "dev" into the
+// PNG's provenance.
+func TestResolveVersion(t *testing.T) {
+	info := func(main string, settings ...debug.BuildSetting) func() (*debug.BuildInfo, bool) {
+		return func() (*debug.BuildInfo, bool) {
+			return &debug.BuildInfo{Main: debug.Module{Version: main}, Settings: settings}, true
+		}
+	}
+	rev := debug.BuildSetting{Key: "vcs.revision", Value: "8a8a2fe7bcca0123456789"}
+	dirty := debug.BuildSetting{Key: "vcs.modified", Value: "true"}
+	for _, tc := range []struct {
+		name, ldflag string
+		read         func() (*debug.BuildInfo, bool)
+		want         string
+	}{
+		{"ldflag kept", "0.3.0", info("v0.1.0"), "0.3.0"},
+		{"go install", "dev", info("v0.1.0"), "0.1.0"},
+		{"pseudo-version", "dev", info("v0.3.1-0.20261127205238-8a8a2fe7bcca", rev), "0.3.1-0.20261127205238-8a8a2fe7bcca"},
+		{"devel with commit", "dev", info("(devel)", rev), "dev+8a8a2fe7bcca"},
+		{"devel dirty", "dev", info("(devel)", rev, dirty), "dev+8a8a2fe7bcca.dirty"},
+		{"devel, no vcs", "dev", info("(devel)"), "dev"},
+		{"no build info", "dev", func() (*debug.BuildInfo, bool) { return nil, false }, "dev"},
+	} {
+		if got := resolveVersion(tc.ldflag, tc.read); got != tc.want {
+			t.Errorf("%s: resolveVersion = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"sort"
 	"strconv"
@@ -138,8 +139,50 @@ var cli struct {
 	Version bool    `short:"v" name:"version" help:"Print version and exit."`
 }
 
-// version is set by GoReleaser via -ldflags "-X main.version=..."
+// version is set by GoReleaser via -ldflags "-X main.version=..."; init
+// falls back to the build info for every other build.
 var version = "dev"
+
+func init() { version = resolveVersion(version, debug.ReadBuildInfo) }
+
+// resolveVersion keeps an ldflag version and otherwise reads the one the Go
+// toolchain recorded. `go install …@v0.3.0` and a `go build` in a checkout
+// both embed a module version, and printing "dev" for them put
+// taker:version=dev into every PNG they made — provenance that names no
+// build. A build with no module version still names its commit, when the
+// toolchain recorded one.
+func resolveVersion(ldflag string, read func() (*debug.BuildInfo, bool)) string {
+	if ldflag != "dev" {
+		return ldflag
+	}
+	info, ok := read()
+	if !ok || info == nil {
+		return ldflag
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return strings.TrimPrefix(v, "v")
+	}
+	var rev string
+	dirty := false
+	for _, kv := range info.Settings {
+		switch kv.Key {
+		case "vcs.revision":
+			rev = kv.Value
+		case "vcs.modified":
+			dirty = kv.Value == "true"
+		}
+	}
+	if rev == "" {
+		return ldflag
+	}
+	if len(rev) > 12 {
+		rev = rev[:12]
+	}
+	if dirty {
+		return ldflag + "+" + rev + ".dirty"
+	}
+	return ldflag + "+" + rev
+}
 
 // isVersionProbe answers AXI's version fast path: agents and harnesses probe
 // -v, -V and --version constantly, so a bare version flag prints and exits

@@ -467,7 +467,11 @@ in the image. `sha256` fingerprints every input that fed the image (`source`,
 invocation (shell-quoted so it replays, with the binary's base name instead of
 its path) and its UTC time — the same provenance the PNG itself embeds as `tEXt`
 chunks (`taker:sha256`, `taker:command`, `taker:generated`, `taker:version`), so an
-image that travels without the report still describes itself — with one
+image that travels without the report still describes itself. `version` (and
+`taker --version`) is the release tag for a release build, the module version
+for `go install` or a `go build` in a git clone (a pseudo-version such as
+`0.3.1-0.2026…-54baaba5771c`), `dev+<commit>` when only the commit is known, and
+`dev` when nothing is — with one
 exception: every `--redact` literal is replaced by `<redacted>` in `command`
 and in the PNG chunks, because a masked value must not leak through
 provenance. Each `sha256` covers the input as taker matched and drew it, in
