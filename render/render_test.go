@@ -721,3 +721,38 @@ func TestTerminalDropsTheGutter(t *testing.T) {
 			term.Bounds().Dx(), code.Bounds().Dx())
 	}
 }
+
+// A snap draws its footnote and caption in place on one canvas, while the HTTP
+// path appends them with withFootnote and withCaption. The two must produce the
+// same pixels, or the same note looks different depending on the command.
+func TestInPlaceStripsMatchTheWrappers(t *testing.T) {
+	lines, err := highlight.Tokenize("a = 1\nb = 2\nc = 3\n", "python", "x.py", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := metricsFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, caption := range []string{"short", strings.Repeat("a long caption that has to wrap ", 6)} {
+		base := Config{Lines: lines, Title: "x.py", Theme: DefaultTheme, WindowChrome: true, Shadow: true, noWarn: true}
+		bare, err := Render(&base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const ref = "x.py @ 9f344fad66cf"
+		full := base
+		full.SourceRef, full.Caption = ref, caption
+		got, err := Render(&full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := withCaption(withFootnote(bare, ref, DefaultTheme.UI, m), caption, DefaultTheme.UI, m)
+		if got.Bounds() != want.Bounds() {
+			t.Fatalf("bounds %v, want %v", got.Bounds(), want.Bounds())
+		}
+		if !reflect.DeepEqual(got.Pix, want.Pix) {
+			t.Errorf("caption %.10q: in-place strips differ from the wrapper composition", caption)
+		}
+	}
+}

@@ -550,7 +550,36 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 		cfg.warnf("%q is %dpx tall; --context or a line range makes it readable", cfg.Title, l.totalHeight)
 	}
 
-	img := image.NewNRGBA(image.Rect(0, 0, l.totalWidth, l.totalHeight))
+	// The redaction count is pure geometry, and the footnote that declares it
+	// has to be sized before the canvas exists, so count it up front.
+	var redactRuns []markRun
+	{
+		y := l.codeAreaY + l.padY
+		for _, vl := range vlines {
+			if vl.isGap {
+				y += gapRowHeight
+				continue
+			}
+			for _, box := range l.markBoxes(cfg.RedactRegions, vl.lineNum, vl, wrapCols) {
+				redactRuns = append(redactRuns, markRun{box.x1, box.x2, y, y + l.lineHeight})
+			}
+			y += l.lineHeight
+		}
+	}
+	cfg.Redacted = len(redactRuns)
+
+	// A snap is composed on one canvas: the panel is drawn straight into its
+	// place inside the window, and the bar, margin, shadow and strips around
+	// it. Wrapping the panel in a new full-size image per layer cost a full
+	// allocation, fill and copy each time — peak memory four times the PNG.
+	var img *image.NRGBA
+	var snap *snapCanvas
+	if cfg.HTTPMode {
+		img = image.NewNRGBA(image.Rect(0, 0, l.totalWidth, l.totalHeight))
+	} else {
+		snap = newSnapCanvas(cfg, l, m)
+		img = snap.panel
+	}
 
 	// Pass 1: backgrounds. The gutter rule is a hairline between the line
 	// numbers and the text: snap has always had one, and Burp's message editor
@@ -568,7 +597,7 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	}
 
 	// Pass 3: visual lines
-	var hlRuns, redactRuns []markRun
+	var hlRuns []markRun
 	y := l.codeAreaY + l.padY
 
 	for _, vl := range vlines {
@@ -601,9 +630,6 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 				continue
 			}
 			hlRuns = append(hlRuns, markRun{box.x1, box.x2, rowY, rowBottom})
-		}
-		for _, box := range l.markBoxes(cfg.RedactRegions, vl.lineNum, vl, wrapCols) {
-			redactRuns = append(redactRuns, markRun{box.x1, box.x2, rowY, rowBottom})
 		}
 
 		// Line number on the first visual row only; continuation rows get a
@@ -671,7 +697,6 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	// Redaction goes last: a masked span must cover whatever it overlaps,
 	// including a mark border. Black on every theme — a redaction bar reads
 	// the same whether the report page is dark or white.
-	cfg.Redacted = len(redactRuns)
 	for _, run := range mergeRuns(redactRuns) {
 		fillRect(img, image.Rect(run.x1, run.y1, run.x2, run.y2), color.NRGBA{0, 0, 0, 0xff})
 	}
@@ -679,16 +704,82 @@ func Render(cfg *Config) (*image.NRGBA, error) {
 	if cfg.HTTPMode {
 		return img, nil // caller composes the panels, then adds the caption
 	}
+	return snap.finish(cfg, ui, m), nil
+}
+
+// snapCanvas is a snap's final image laid out before anything is drawn: the
+// window (bar plus panel) inside the chrome margin, then the footnote and the
+// caption strips below it.
+type snapCanvas struct {
+	out               *image.NRGBA
+	win               image.Rectangle // the window inside the margin, bar included
+	panel             *image.NRGBA    // zero-origin view of the editor pane inside out
+	footnote, caption []string
+	footTop, capTop   int // first pixel of each strip, below its gap
+	capH              int // the caption strip's own height, gap excluded
+}
+
+// newSnapCanvas sizes the whole image, allocates it once and fills what the
+// panel will not cover. The panel view has its origin at (0,0) and shares
+// out's pixels, so the drawing code keeps its panel-relative coordinates.
+func newSnapCanvas(cfg *Config, l *layout, m *metrics) *snapCanvas {
+	ui := cfg.Theme.UI
+	barH := 0
+	if cfg.WindowChrome {
+		barH = windowBarH
+	}
+	win := image.Rect(chromeMargin, chromeMargin,
+		chromeMargin+l.totalWidth, chromeMargin+barH+l.totalHeight)
+	sw, sh := win.Max.X+chromeMargin, win.Max.Y+chromeMargin
+
 	// Caption and footnote go outside the window: they annotate the screenshot,
 	// they are not part of the editor being screenshotted. The footnote sits
-	// inside the caption, closest to the code it describes.
-	panel := img
+	// inside the caption, closest to the code it describes. Each may widen the
+	// canvas for the next, which is why they are laid out in this order.
+	c := &snapCanvas{win: win}
+	note := joinNotes(cfg.SourceRef, cropNote("", cfg.Lines, cfg.TotalLines), redactNote(cfg.Redacted, cfg.RedactAsked))
+	var footH, capH int
+	c.footnote, sw, footH = footnoteStrip.layout(m, note, sw)
+	c.caption, sw, capH = captionStrip.layout(m, cfg.Caption, sw)
+	c.footTop = sh + footnoteGap
+	c.capTop = sh + footH + captionGap
+	c.capH = capH - captionGap
+
+	c.out = image.NewNRGBA(image.Rect(0, 0, sw, sh+footH+capH))
+	// Everything but the window is canvas; the panel paints its own background.
+	fillRect(c.out, image.Rect(0, 0, sw, win.Min.Y), ui.ChromeBg)
+	fillRect(c.out, image.Rect(0, win.Min.Y, win.Min.X, win.Max.Y), ui.ChromeBg)
+	fillRect(c.out, image.Rect(win.Max.X, win.Min.Y, sw, win.Max.Y), ui.ChromeBg)
+	fillRect(c.out, image.Rect(0, win.Max.Y, sw, c.out.Rect.Max.Y), ui.ChromeBg)
+
+	c.panel = view(c.out, image.Rect(win.Min.X, win.Min.Y+barH, win.Max.X, win.Max.Y))
+	return c
+}
+
+// finish draws what surrounds the panel once the panel is on the canvas.
+func (c *snapCanvas) finish(cfg *Config, ui UIColors, m *metrics) *image.NRGBA {
 	if cfg.WindowChrome {
-		panel = withWindowBar(panel, cfg.Title, ui, m)
+		drawWindowBar(view(c.out, image.Rect(c.win.Min.X, c.win.Min.Y, c.win.Max.X, c.win.Min.Y+windowBarH)),
+			cfg.Title, ui, m)
 	}
-	out := applyChrome(panel, ui, cfg.Shadow)
-	out = withFootnote(out, joinNotes(cfg.SourceRef, cropNote("", cfg.Lines, cfg.TotalLines), redactNote(cfg.Redacted, cfg.RedactAsked)), ui, m)
-	return withCaption(out, cfg.Caption, ui, m), nil
+	if cfg.Shadow {
+		drawShadow(c.out, c.win)
+	}
+	roundCorners(c.out, c.win, chromeRadius, ui.ChromeBg, ui.TabBorder)
+	drawFootnote(c.out, c.footTop, c.footnote, ui, m)
+	drawCaption(c.out, c.capTop, c.capH, c.caption, ui, m)
+	return c.out
+}
+
+// view is r of img as an image with its origin at (0,0), sharing img's pixels.
+// Code that draws a panel in panel coordinates can then draw it in place.
+func view(img *image.NRGBA, r image.Rectangle) *image.NRGBA {
+	r = r.Intersect(img.Rect)
+	return &image.NRGBA{
+		Pix:    img.Pix[img.PixOffset(r.Min.X, r.Min.Y):],
+		Stride: img.Stride,
+		Rect:   image.Rect(0, 0, r.Dx(), r.Dy()),
+	}
 }
 
 // markRun is one marked rectangle. Column marks make the horizontal extent
@@ -850,29 +941,14 @@ func ellipsizeLeft(face font.Face, s string, maxWidth int) string {
 	return ellipsis
 }
 
-// applyChrome wraps a panel in a margin with rounded corners and a hairline
-// border, so the output reads as a window instead of a raw crop.
-func applyChrome(panel *image.NRGBA, ui UIColors, shadow bool) *image.NRGBA {
-	pw, ph := panel.Bounds().Dx(), panel.Bounds().Dy()
-	out := image.NewNRGBA(image.Rect(0, 0, pw+2*chromeMargin, ph+2*chromeMargin))
-	fillRect(out, out.Bounds(), ui.ChromeBg)
-
-	inner := image.Rect(chromeMargin, chromeMargin, chromeMargin+pw, chromeMargin+ph)
-	if shadow {
-		drawShadow(out, inner)
-	}
-	draw.Draw(out, inner, panel, panel.Bounds().Min, draw.Src)
-	roundCorners(out, inner, chromeRadius, ui.ChromeBg, ui.TabBorder)
-	return out
-}
-
 // drawShadow lays the window's silhouette under it before the panel is pasted.
 // The silhouette is the window rect pushed down shadowOffsetY; a Chebyshev
 // distance ramp over shadowSpread pixels is what a blur reads as at this size.
 //
-// Pixels inside win are skipped: the panel is pasted over them with draw.Src
-// and roundCorners repaints the corners from the background, so shading them
-// was nine tenths of the work for none of the output.
+// Pixels inside win are skipped: the panel owns them, and roundCorners
+// repaints the corners from the background, so shading them was nine tenths
+// of the work for none of the output. Skipping them also means the shadow can
+// be laid after the panel is drawn in place.
 func drawShadow(img *image.NRGBA, win image.Rectangle) {
 	shifted := win.Add(image.Pt(0, shadowOffsetY))
 	black := rgb(0, 0, 0)
@@ -897,13 +973,11 @@ func drawShadow(img *image.NRGBA, win image.Rectangle) {
 	}
 }
 
-// withWindowBar dresses the panel as a window: a title band above the tab bar
+// drawWindowBar dresses the panel as a window: a title band above the tab bar
 // carrying the traffic-light dots and the file name centred. The dots use the
-// OS palette — they are the window's, not the app's.
-func withWindowBar(panel *image.NRGBA, title string, ui UIColors, m *metrics) *image.NRGBA {
-	w, h := panel.Bounds().Dx(), panel.Bounds().Dy()
-	out := image.NewNRGBA(image.Rect(0, 0, w, h+windowBarH))
-	draw.Draw(out, image.Rect(0, windowBarH, w, h+windowBarH), panel, panel.Bounds().Min, draw.Src)
+// OS palette — they are the window's, not the app's. out is the band itself.
+func drawWindowBar(out *image.NRGBA, title string, ui UIColors, m *metrics) {
+	w := out.Bounds().Dx()
 	fillRect(out, image.Rect(0, 0, w, windowBarH), ui.TabBarBg)
 	fillRect(out, image.Rect(0, windowBarH-1, w, windowBarH), ui.TabBorder)
 
@@ -922,7 +996,6 @@ func withWindowBar(panel *image.NRGBA, title string, ui UIColors, m *metrics) *i
 	}
 	tx := max(0, (w-textWidth(m.uiFace, title))/2)
 	drawString(out, m.uiFace, title, tx, m.baselineUI(0, windowBarH), ui.LineNumFg)
-	return out
 }
 
 // drawCircle fills a disc with an anti-aliased edge.
@@ -1259,6 +1332,57 @@ func plural(n int, one, many string) string {
 	return many
 }
 
+// stripSpec is the spacing of one annotation strip under the screenshot.
+type stripSpec struct {
+	gap, padY int
+	lineMul   float64
+}
+
+var (
+	footnoteStrip = stripSpec{footnoteGap, footnotePadY, footnoteLineMul}
+	captionStrip  = stripSpec{captionGap, captionPadY, captionLineMul}
+)
+
+// stripTextX is where strip text starts: aligned with the caption's text
+// rather than with the window edge. The two strips stack, and a note starting
+// where the caption's bar is would read as a stray label rather than a second
+// line.
+const stripTextX = captionPadX + captionBarW + captionPadX
+
+// layout wraps text for a canvas sw wide. It returns the lines, the canvas
+// width they need and the height the strip adds, gap included; no lines and
+// no height when there is nothing to say.
+func (s stripSpec) layout(m *metrics, text string, sw int) ([]string, int, int) {
+	if text == "" {
+		return nil, sw, 0
+	}
+	lines := wrapWords(m.face, text, sw-stripTextX-captionMinPad)
+	if len(lines) == 0 {
+		return nil, sw, 0 // whitespace only: no strip, no empty band
+	}
+	if len(lines) == 1 {
+		if w := stripTextX + textWidth(m.face, lines[0]) + captionMinPad; w > sw {
+			sw = w
+		}
+	}
+	return lines, sw, s.gap + s.padY*2 + len(lines)*m.lineHeightFor(s.lineMul)
+}
+
+// extendCanvas grows shot to w×(shot height+addH), with the new area painted
+// bg. Only the uncovered strips are filled: the shot's own rows are copied in.
+func extendCanvas(shot *image.NRGBA, w, addH int, bg color.NRGBA) *image.NRGBA {
+	sb := shot.Bounds()
+	sw, sh := sb.Dx(), sb.Dy()
+	out := image.NewNRGBA(image.Rect(0, 0, w, sh+addH))
+	for y := 0; y < sh; y++ {
+		so := shot.PixOffset(sb.Min.X, sb.Min.Y+y)
+		copy(out.Pix[y*out.Stride:y*out.Stride+sw*4], shot.Pix[so:so+sw*4])
+	}
+	fillRect(out, image.Rect(sw, 0, w, sh), bg)
+	fillRect(out, image.Rect(0, sh, w, sh+addH), bg)
+	return out
+}
+
 // withFootnote appends a muted line stating what the view leaves out. Trimmed
 // evidence that does not say it was trimmed reads as the whole message: the
 // releaser cannot tell a 9-line response from the first 9 lines of a 3000-line
@@ -1266,38 +1390,22 @@ func plural(n int, one, many string) string {
 // assertion. Muted, and without the caption's accent bar: this is the tool
 // describing the crop, not the analyst making a claim.
 func withFootnote(shot *image.NRGBA, text string, ui UIColors, m *metrics) *image.NRGBA {
-	if text == "" {
+	lines, sw, h := footnoteStrip.layout(m, text, shot.Bounds().Dx())
+	if lines == nil {
 		return shot
 	}
-	sw, sh := shot.Bounds().Dx(), shot.Bounds().Dy()
-	// Aligned with the caption's text rather than with the window edge: the two
-	// strips stack, and a note starting where the caption's bar is would read as
-	// a stray label rather than a second line.
-	textX := captionPadX + captionBarW + captionPadX
+	out := extendCanvas(shot, sw, h, ui.ChromeBg)
+	drawFootnote(out, shot.Bounds().Dy()+footnoteGap, lines, ui, m)
+	return out
+}
 
-	avail := sw - textX - captionMinPad
-	lines := wrapWords(m.face, text, avail)
-	if len(lines) == 0 {
-		return shot
-	}
-	if len(lines) == 1 {
-		if w := textX + textWidth(m.face, lines[0]) + captionMinPad; w > sw {
-			sw = w
-		}
-	}
-	stripH := footnotePadY*2 + len(lines)*m.lineHeightFor(footnoteLineMul)
-
-	out := image.NewNRGBA(image.Rect(0, 0, sw, sh+footnoteGap+stripH))
-	fillRect(out, out.Bounds(), ui.ChromeBg)
-	draw.Draw(out, shot.Bounds(), shot, shot.Bounds().Min, draw.Src)
-
-	top := sh + footnoteGap
+// drawFootnote writes the footnote lines into a strip starting at top.
+func drawFootnote(out *image.NRGBA, top int, lines []string, ui UIColors, m *metrics) {
 	lineH := m.lineHeightFor(footnoteLineMul)
 	for i, line := range lines {
 		y := top + footnotePadY + i*lineH
-		drawString(out, m.face, line, textX, m.baselineIn(y, lineH), ui.LineNumFg)
+		drawString(out, m.face, line, stripTextX, m.baselineIn(y, lineH), ui.LineNumFg)
 	}
-	return out
 }
 
 // cropNote describes a view that does not hold every line of its message. It
@@ -1364,43 +1472,34 @@ func joinNotes(notes ...string) string {
 // travels into a report is read by someone who was not there: a red box says
 // "look here", the caption says why. Drawn only when asked, so an unlabelled
 // render still passes for a plain screenshot.
+//
+// It wraps to the screenshot's width rather than widening the image: a long
+// finding description would otherwise stretch the PNG past the pane.
 func withCaption(shot *image.NRGBA, text string, ui UIColors, m *metrics) *image.NRGBA {
-	if text == "" {
+	lines, sw, h := captionStrip.layout(m, text, shot.Bounds().Dx())
+	if lines == nil {
 		return shot
 	}
-	sw, sh := shot.Bounds().Dx(), shot.Bounds().Dy()
-	textX := captionPadX + captionBarW + captionPadX
-
-	// Wrap to the screenshot's width rather than widening the image: a long
-	// finding description would otherwise stretch the PNG past the pane.
-	avail := sw - textX - captionMinPad
-	lines := wrapWords(m.face, text, avail)
-	if len(lines) == 0 {
-		return shot // whitespace only: no strip, no empty band
-	}
-	if len(lines) == 1 {
-		if w := textX + textWidth(m.face, lines[0]) + captionMinPad; w > sw {
-			sw = w
-		}
-	}
-	stripH := captionPadY*2 + len(lines)*m.lineHeightFor(captionLineMul)
-
-	out := image.NewNRGBA(image.Rect(0, 0, sw, sh+captionGap+stripH))
 	// ChromeBg, never the app's own palette: this line is the analyst talking,
 	// and evidence must not imply the tool under test printed it.
-	fillRect(out, out.Bounds(), ui.ChromeBg)
-	draw.Draw(out, shot.Bounds(), shot, shot.Bounds().Min, draw.Src)
+	out := extendCanvas(shot, sw, h, ui.ChromeBg)
+	drawCaption(out, shot.Bounds().Dy()+captionGap, h-captionGap, lines, ui, m)
+	return out
+}
 
-	top := sh + captionGap
+// drawCaption writes the caption and its accent bar into a strip of height
+// stripH starting at top.
+func drawCaption(out *image.NRGBA, top, stripH int, lines []string, ui UIColors, m *metrics) {
+	if len(lines) == 0 {
+		return
+	}
 	fillRect(out, image.Rect(captionPadX, top+captionPadY, captionPadX+captionBarW, top+stripH-captionPadY),
 		ui.HighlightBorder)
-
 	lineH := m.lineHeightFor(captionLineMul)
 	for i, line := range lines {
 		y := top + captionPadY + i*lineH
-		drawString(out, m.face, line, textX, m.baselineIn(y, lineH), ui.TabText)
+		drawString(out, m.face, line, stripTextX, m.baselineIn(y, lineH), ui.TabText)
 	}
-	return out
 }
 
 // lineHeightFor is the row height this face needs at the given multiplier.
