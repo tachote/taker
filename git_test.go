@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/tachote/taker/highlight"
 )
 
 // Evidence has to show the code of the revision being reported. Reading it out
@@ -102,5 +104,18 @@ func TestReadGitBlob(t *testing.T) {
 		if code != tc.want {
 			t.Errorf("taker --git %s = %d, want %d\n%s", tc.spec, code, tc.want, stdout)
 		}
+	}
+}
+
+// --git has no file argument, so the lexer used to get an empty name and
+// short code came out flat. The path inside the revision names the language.
+func TestGitPathPicksTheLexer(t *testing.T) {
+	src := "def login(user):\n    return user\n"
+	origin := sourceInfo{Kind: "git", Path: "src/auth.py"}
+	if got := highlight.LexerName(src, "", lexFilename("", origin)); got != "Python" {
+		t.Errorf("lexer for --git HEAD:src/auth.py = %q, want Python", got)
+	}
+	if got := lexFilename("a.go", sourceInfo{Kind: "file", Path: "a.go"}); got != "a.go" {
+		t.Errorf("lexFilename for a file = %q, want the file argument", got)
 	}
 }

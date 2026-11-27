@@ -399,7 +399,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 		return rep.fail(exitUsage, kindUsage, "--first-line must be 1 or more")
 	}
 
-	all, err := highlight.Tokenize(string(src), cmd.Lang, cmd.File, theme.Chroma)
+	all, err := highlight.Tokenize(string(src), cmd.Lang, lexFilename(cmd.File, origin), theme.Chroma)
 	if err != nil {
 		return rep.fail(exitInput, kindInput, "tokenize: %v", err)
 	}
@@ -1857,6 +1857,16 @@ type sourceInfo struct {
 	Path string
 	Ref  string
 	Rev  string
+}
+
+// lexFilename is the name the lexer picks a language from. With --git there
+// is no file argument — the path lives in the origin — and an empty name left
+// short code to content analysis, which rendered it flat.
+func lexFilename(file string, origin sourceInfo) string {
+	if origin.Kind == "git" {
+		return origin.Path
+	}
+	return file
 }
 
 // errGitUsage marks a --git value that is malformed — the caller's mistake,
