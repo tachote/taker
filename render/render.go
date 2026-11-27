@@ -97,6 +97,10 @@ const (
 	tabCloseGap = 10 // space between the title and the close glyph in the tab
 	// gClose is nf-fa-close: the × a VS Code tab shows on its trailing edge.
 	gClose = '\uf00d'
+	// iconAdvanceProbe is the glyph whose advance sizes the icon cell. The
+	// face is monospaced, so any glyph would do, but it has to exist: the
+	// embedded font is a subset, and a missing glyph measures as .notdef.
+	iconAdvanceProbe = '\U000f07d3'
 )
 
 // Config holds all parameters for a single render pass.
@@ -270,7 +274,7 @@ func loadMetrics() (*metrics, error) {
 	}
 
 	iconMetrics := iconFace.Metrics()
-	iconAdv, ok := iconFace.GlyphAdvance(0xf07d3)
+	iconAdv, ok := iconFace.GlyphAdvance(iconAdvanceProbe)
 	if !ok {
 		iconAdv = fixed.I(14)
 	}
