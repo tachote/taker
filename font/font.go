@@ -33,9 +33,22 @@ func LoadFace(sizePt, dpi float64) (font.Face, error) {
 }
 
 var (
-	coverageOnce sync.Once
-	coverageFont *sfnt.Font
+	coverageOnce  sync.Once
+	coverageFont  *sfnt.Font
+	coverageASCII [128]bool
+	// coverageRest caches the answer for every other rune asked about. The
+	// renderer asks for each visible rune of a view, and a fresh lookup costs
+	// an sfnt.Buffer allocation (1.8 KB) every time.
+	coverageRest sync.Map // rune -> bool
 )
+
+// hasGlyph does the actual lookup. The sfnt package documents (0, nil) as "no
+// glyph for r", and glyph 0 is .notdef by convention — the empty box that
+// actually gets drawn.
+func hasGlyph(buf *sfnt.Buffer, r rune) bool {
+	idx, err := coverageFont.GlyphIndex(buf, r)
+	return err == nil && idx != 0
+}
 
 // CanDraw reports whether the embedded code font has a glyph for r, and whether
 // that could be established at all. A character with no glyph is drawn as an
@@ -49,15 +62,27 @@ var (
 func CanDraw(r rune) (drawable, known bool) {
 	coverageOnce.Do(func() {
 		coverageFont, _ = opentype.Parse(JetBrainsMonoTTF)
+		if coverageFont == nil {
+			return
+		}
+		var buf sfnt.Buffer
+		for c := range coverageASCII {
+			coverageASCII[c] = hasGlyph(&buf, rune(c))
+		}
 	})
 	if coverageFont == nil {
 		return true, false
 	}
+	if r >= 0 && r < rune(len(coverageASCII)) {
+		return coverageASCII[r], true
+	}
+	if ok, cached := coverageRest.Load(r); cached {
+		return ok.(bool), true
+	}
 	var buf sfnt.Buffer
-	idx, err := coverageFont.GlyphIndex(&buf, r)
-	// The sfnt package documents (0, nil) as "no glyph for r", and glyph 0 is
-	// .notdef by convention — the empty box that actually gets drawn.
-	return err == nil && idx != 0, true
+	ok := hasGlyph(&buf, r)
+	coverageRest.Store(r, ok)
+	return ok, true
 }
 
 func fallbackFace(sizePt, dpi float64) (font.Face, error) {
