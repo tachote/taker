@@ -362,3 +362,104 @@ func TestTokenizeTextFallbackFollowsBackground(t *testing.T) {
 		t.Errorf("black text style drew #%02x%02x%02x, want #000000", tok.R, tok.G, tok.B)
 	}
 }
+
+// Every range expands to one entry per line, so a typo such as "1-300000000"
+// used gigabytes before anything could refuse it. With the length known the
+// range is clamped first; without it a range too wide to expand is refused.
+func TestLineSpecClampsToFile(t *testing.T) {
+	G := GapSentinel
+	cases := []struct {
+		in      string
+		maxLine int
+		want    []int
+	}{
+		{"1-300000000", 3, []int{1, 2, 3}},
+		{"2,1-99999999", 5, []int{1, 2, 3, 4, 5}},
+		{"1,3,900", 3, []int{1, G, 3, G, 900}},
+		// Wholly past the end keeps its first line: an empty spec would mean
+		// "every line" and render the file the analyst tried to narrow.
+		{"500-600", 3, []int{500}},
+	}
+	for _, c := range cases {
+		got, err := ParseLineSpecMax(c.in, c.maxLine)
+		if err != nil {
+			t.Errorf("ParseLineSpecMax(%q, %d): %v", c.in, c.maxLine, err)
+			continue
+		}
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("ParseLineSpecMax(%q, %d) = %v, want %v", c.in, c.maxLine, got, c.want)
+		}
+	}
+	if _, err := ParseLineSpec("1-300000000"); err == nil || !strings.Contains(err.Error(), "spans more than") {
+		t.Errorf("unclamped huge range: err = %v, want a refusal", err)
+	}
+	if _, err := ParseLineSpec("1-1000000"); err != nil {
+		t.Errorf("a range of exactly MaxRangeLines should pass: %v", err)
+	}
+	if _, err := ParseHighlightSpec("2-10000000"); err == nil {
+		t.Error("ParseHighlightSpec should refuse an unclamped huge range")
+	}
+
+	// The clamped-off part of a highlight stays as one line past the end, so
+	// the out-of-view warning still names a mark the analyst asked for.
+	hl, err := ParseHighlightSpecMax("2-10000000,7:3-4", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := []Span{{}}
+	if want := (Marks{2: whole, 3: whole, 4: whole, 7: {{Start: 3, End: 4}}}); !reflect.DeepEqual(hl, want) {
+		t.Errorf("ParseHighlightSpecMax = %v, want %v", hl, want)
+	}
+	if hl, _ := ParseHighlightSpecMax("5-9", 3); !reflect.DeepEqual(hl, Marks{5: whole}) {
+		t.Errorf("range wholly past the end = %v, want just line 5", hl)
+	}
+
+	// Context windows clamp too; a mark past the end keeps its own number.
+	if got := ContextSpecMax(Marks{2: whole}, 10000000, 3); !reflect.DeepEqual(got, []int{1, 2, 3}) {
+		t.Errorf("ContextSpecMax huge context = %v, want [1 2 3]", got)
+	}
+	if got := ContextSpecMax(Marks{10: whole}, 2, 3); !reflect.DeepEqual(got, []int{10}) {
+		t.Errorf("ContextSpecMax mark past the end = %v, want [10]", got)
+	}
+	// Overlapping windows are emitted once.
+	if got := ContextSpec(Marks{10: whole, 11: whole}, 2); !reflect.DeepEqual(got, []int{8, 9, 10, 11, 12, 13}) {
+		t.Errorf("overlapping windows = %v", got)
+	}
+}
+
+// A line-spec error has to say what shape was expected, not echo strconv; a
+// trailing comma is accepted in --lines as it is in --highlight; and line 0
+// is refused by both parsers alike.
+func TestLineSpecErrors(t *testing.T) {
+	if got, err := ParseLineSpec("1,3,"); err != nil || !reflect.DeepEqual(got, []int{1, GapSentinel, 3}) {
+		t.Errorf("trailing comma: got %v, %v", got, err)
+	}
+	cases := []struct {
+		in, want string
+		hl       bool
+	}{
+		{"2:", "columns go in --highlight", false},
+		{"x", "expected N or N-M", false},
+		{"0-5", "line numbers start at 1", false},
+		{"0", "line numbers start at 1", false},
+		{"2-3:4", "a column range needs a single line", true},
+		{"x:1", "expected N:C or N:C-D", true},
+		{"7:x", "expected N:C or N:C-D", true},
+		{"0-5", "line numbers start at 1", true},
+	}
+	for _, c := range cases {
+		var err error
+		if c.hl {
+			_, err = ParseHighlightSpec(c.in)
+		} else {
+			_, err = ParseLineSpec(c.in)
+		}
+		if err == nil {
+			t.Errorf("%q (highlight=%v) should fail", c.in, c.hl)
+			continue
+		}
+		if !strings.Contains(err.Error(), c.want) || strings.Contains(err.Error(), "strconv") {
+			t.Errorf("%q (highlight=%v): err = %q, want it to say %q and not mention strconv", c.in, c.hl, err, c.want)
+		}
+	}
+}
