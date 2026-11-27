@@ -7,6 +7,10 @@ import (
 	"image/draw"
 	"regexp"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/alecthomas/chroma/v2"
+	"github.com/alecthomas/chroma/v2/lexers"
 
 	"github.com/tachote/taker/highlight"
 )
@@ -100,38 +104,200 @@ func (cfg *HTTPConfig) warnf(format string, args ...any) {
 // it needs the blank line that ends the header block to tell a header from a
 // body line.
 func burpColourMessage(lines []highlight.LineTokens) []highlight.LineTokens {
-	inHeaders := true
-	contentType := ""
+	texts := make([]string, len(lines))
+	for i, lt := range lines {
+		texts[i] = lt.Text()
+	}
+	layout := layoutHTTP(texts)
+	markup := isMarkup(layout.contentType)
 	for i := range lines {
 		lt := &lines[i]
 		if lt.IsGap {
 			continue
 		}
-		text := lineText(*lt)
+		text := texts[i]
 		switch {
-		case inHeaders && isStartLine(text):
+		case i >= layout.body:
+			lt.Tokens = burpBodyTokens(text, lt.Tokens, layout.contentType, markup)
+		case isStartLine(text):
 			// Request line or status line: one colour, no structure. Only a
 			// line inside the header block can be one — a body line like
 			// "GET /x HTTP/1.1" (a nested request, a pasted log) is body text.
 			lt.Tokens = []highlight.Token{colourToken(text, burpLineColour)}
-		case inHeaders && strings.TrimSpace(text) == "":
-			inHeaders = false // the separator between headers and body
-		case inHeaders:
-			if name, value, ok := splitHeader(text); ok && contentType == "" && isContentTypeHeader(name) {
-				contentType = strings.ToLower(strings.TrimSpace(value))
-			}
-			lt.Tokens = burpHeaderTokens(text)
+		case strings.TrimSpace(text) == "":
+			// The separator that closes a header block.
 		default:
-			lt.Tokens = burpBodyTokens(text, lt.Tokens, contentType)
+			lt.Tokens = burpHeaderTokens(text)
 		}
 	}
 	return lines
 }
 
-// isContentTypeHeader names the one header whose value decides how the body is
-// painted.
-func isContentTypeHeader(name string) bool {
-	return strings.EqualFold(strings.Trim(strings.TrimSpace(name), ":"), "content-type")
+// httpLayout says where the parts of a message are, as 0-based line indexes.
+type httpLayout struct {
+	status      int    // first line of the final header block: the start line the image must show
+	body        int    // first body line; the line count when the message has no body
+	contentType string // the final block's Content-Type, lowercased, parameters kept
+	encoding    string // the final block's Content-Encoding, lowercased
+}
+
+// interimStatusRe matches the status lines that announce another response
+// after them: 1xx (100 Continue, 103 Early Hints) and the 200 a proxy sends
+// back for CONNECT, which curl -i prints in front of the real response.
+var interimStatusRe = regexp.MustCompile(`(?i)^HTTP/[0-9](?:\.[0-9])? +(?:1[0-9]{2}\b|2[0-9]{2} +connection established)`)
+
+// statusLineRe is the start of a status line, for the line after an interim block.
+var statusLineRe = regexp.MustCompile(`^HTTP/[0-9]`)
+
+// layoutHTTP finds the header block, the body, and the Content-Type that
+// decides how the body is painted. An interim block followed by a status line
+// is not the end of the headers: the real response comes after it, and its
+// headers and body are typed by its own block. Only those two interim shapes
+// open a new block, so a final response whose body echoes "HTTP/1.1 200" (an
+// SSRF reading an internal service) keeps that echo as body.
+func layoutHTTP(lines []string) httpLayout {
+	start := 0
+	for {
+		l := httpLayout{status: start, body: len(lines)}
+		sep := -1
+		for i := start; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "" {
+				sep = i
+				break
+			}
+			name, value, ok := splitHeader(lines[i])
+			if !ok {
+				continue
+			}
+			switch v := strings.ToLower(strings.TrimSpace(value)); headerKey(name) {
+			case "content-type":
+				if l.contentType == "" {
+					l.contentType = v
+				}
+			case "content-encoding":
+				if l.encoding == "" {
+					l.encoding = v
+				}
+			}
+		}
+		if sep < 0 {
+			return l
+		}
+		next := sep + 1
+		for next < len(lines) && strings.TrimSpace(lines[next]) == "" {
+			next++
+		}
+		if next < len(lines) && interimStatusRe.MatchString(lines[start]) && statusLineRe.MatchString(lines[next]) {
+			start = next
+			continue
+		}
+		l.body = sep + 1
+		return l
+	}
+}
+
+// tokenizeHTTP tokenizes a message in two parts. The header block is plain
+// text, because burpColourMessage repaints every line of it anyway. The body
+// gets the lexer its declared Content-Type names. Handing the whole message to
+// chroma's http lexer instead loses the body colours whenever that lexer
+// rejects one line before it — an HTTP/2 pseudo header, a WebDAV verb, a header
+// with an empty value — and the repainted headers hide that it happened.
+func tokenizeHTTP(msg string, style *chroma.Style) ([]highlight.LineTokens, httpLayout, error) {
+	raw := messageLines(msg)
+	layout := layoutHTTP(raw)
+	msg = strings.Join(raw, "\n")
+
+	body := strings.Join(raw[layout.body:], "\n")
+	if body == "" {
+		lines, err := highlight.Tokenize(msg, "text", "", style)
+		return lines, layout, err
+	}
+	lines, err := highlight.Tokenize(strings.Join(raw[:layout.body], "\n"), "text", "", style)
+	if err != nil {
+		return nil, layout, err
+	}
+	// The block ends in its blank separator, which Tokenize reads as a
+	// trailing newline and drops. The body's line numbers depend on it.
+	for len(lines) < layout.body {
+		lines = append(lines, highlight.LineTokens{LineNum: len(lines) + 1})
+	}
+	bodyLines, err := highlight.Tokenize(body, bodyLexer(layout.contentType), "", style)
+	if err != nil {
+		return nil, layout, err
+	}
+	for i := range bodyLines {
+		bodyLines[i].LineNum += layout.body
+	}
+	return append(lines, bodyLines...), layout, nil
+}
+
+// messageLines splits a message on the lines Tokenize numbers: chroma turns
+// CRLF and a lone CR into LF before it lexes.
+func messageLines(msg string) []string {
+	msg = strings.ReplaceAll(msg, "\r\n", "\n")
+	return strings.Split(strings.ReplaceAll(msg, "\r", "\n"), "\n")
+}
+
+// warnUnreadableBody says when a body's pixels are not its content. A capture
+// saved without decoding draws as rows of replacement glyphs, which reads as
+// "the server sent garbage" instead of "these are the wire bytes". The image
+// stays as it is — it is faithful to the capture — and the warning says what
+// it shows. The CLI's input normaliser re-encodes invalid UTF-8 as U+FFFD, so
+// that rune counts as binary too. A compressed Content-Encoding only changes
+// the message for a body that is unreadable; it never warns on its own.
+func (cfg *HTTPConfig) warnUnreadableBody(side, msg string, layout httpLayout) {
+	body := strings.Join(messageLines(msg)[layout.body:], "\n")
+	if strings.TrimSpace(body) == "" {
+		return
+	}
+	// The header alone does not say the body is still compressed: curl
+	// --compressed, DevTools copies and most proxy exports keep
+	// Content-Encoding but carry the decoded body. Warning on the header would
+	// call faithful evidence unreadable, so the bytes decide whether to warn
+	// and the header only picks the message. Every listed coding's output fails
+	// this check in practice (gzip's 0x8b, zlib's 0x9c, zstd's 0xb5 and LZW's
+	// 0x9d are not UTF-8 lead bytes).
+	if utf8.ValidString(body) && !strings.ContainsAny(body, "\x00\ufffd") {
+		return
+	}
+	for _, coding := range strings.Split(layout.encoding, ",") {
+		switch strings.TrimSpace(coding) {
+		case "gzip", "x-gzip", "br", "deflate", "zstd", "compress", "x-compress":
+			cfg.warnf("the %s body is compressed (Content-Encoding: %s); the image shows the compressed bytes, not the content — decode it before rendering (curl --compressed)",
+				side, layout.encoding)
+			return
+		}
+	}
+	cfg.warnf("the %s body is binary (invalid UTF-8, NUL or U+FFFD); the image shows replacement glyphs, not the content", side)
+}
+
+// mediaType is a Content-Type value without its parameters.
+func mediaType(contentType string) string {
+	mime, _, _ := strings.Cut(contentType, ";")
+	return strings.TrimSpace(mime)
+}
+
+// bodyLexer names the lexer for a declared Content-Type, with the fallback
+// chroma's own http lexer uses: a structured suffix ("application/problem+json")
+// is read as its base type when the full type has no lexer of its own.
+func bodyLexer(contentType string) string {
+	mime := mediaType(contentType)
+	lx := lexers.MatchMimeType(mime)
+	if slash, plus := strings.Index(mime, "/"), strings.LastIndex(mime, "+"); lx == nil && slash >= 0 && plus > slash {
+		lx = lexers.MatchMimeType(mime[:slash+1] + mime[plus+1:])
+	}
+	// Tokenize looks the lexer up by name. A name it cannot resolve would make
+	// it guess from the body's content, and a body without a known type is text.
+	if lx == nil || lexers.Get(lx.Config().Name) == nil {
+		return "text"
+	}
+	return lx.Config().Name
+}
+
+// headerKey is a header name as it compares: lowercased, without the colon
+// splitHeader leaves on it.
+func headerKey(name string) string {
+	return strings.ToLower(strings.Trim(strings.TrimSpace(name), ":"))
 }
 
 // isStartLine reports a request line ("GET /x HTTP/1.1") or a status line
@@ -146,14 +312,6 @@ func isStartLine(s string) bool {
 	return len(parts) == 3 &&
 		!strings.Contains(parts[0], ":") &&
 		strings.HasPrefix(parts[2], "HTTP/")
-}
-
-func lineText(lt highlight.LineTokens) string {
-	var b strings.Builder
-	for _, tok := range lt.Tokens {
-		b.WriteString(tok.Text)
-	}
-	return b.String()
 }
 
 func colourToken(text string, c color.NRGBA) highlight.Token {
@@ -197,7 +355,7 @@ func splitHeader(text string) (name, value string, ok bool) {
 }
 
 func isCookieHeader(name string) bool {
-	switch strings.ToLower(strings.Trim(strings.TrimSpace(name), ":")) {
+	switch headerKey(name) {
 	case "set-cookie", "set-cookie2", "cookie":
 		return true
 	}
@@ -229,7 +387,7 @@ func burpCookieTokens(name, value string) []highlight.Token {
 			colourToken(d, burpParamValue))
 	}
 
-	if strings.EqualFold(strings.Trim(strings.TrimSpace(name), ":"), "cookie") {
+	if headerKey(name) == "cookie" {
 		for {
 			seg, tail, found := strings.Cut(rest, ";")
 			pair(seg)
@@ -291,9 +449,15 @@ func isFraming(s string) bool {
 // Burp decides the body view from the declared Content-Type, not from the
 // shape of a line: a json string carrying "a=1&b=2" is json, not a form. Only
 // a message without a declared type falls back to the line's shape.
-func burpBodyTokens(text string, lexed []highlight.Token, contentType string) []highlight.Token {
+//
+// markup says the body is XML or HTML, whose tag delimiters are split out of
+// the lexer's tokens first (see splitMarkup).
+func burpBodyTokens(text string, lexed []highlight.Token, contentType string, markup bool) []highlight.Token {
 	if isFormContentType(contentType) || (contentType == "" && looksFormEncoded(text)) {
 		return formFieldTokens(text)
+	}
+	if markup {
+		lexed = splitMarkup(lexed)
 	}
 	// Burp paints a body's framing as ordinary text: in
 	// `"username":"test",` the key and its value carry the json colours
@@ -303,6 +467,55 @@ func burpBodyTokens(text string, lexed []highlight.Token, contentType string) []
 	// style, which also colours the separators of a URL's query string and
 	// there the theme's roles (separator, operator) are blue.
 	return repaintFraming(lexed)
+}
+
+// isMarkup reports a declared XML or HTML body: the two lexers whose tag
+// tokens carry delimiters. Decided by type, not by token text, because a JSON
+// key holding "<b>" is in the same tag colour and must stay whole.
+func isMarkup(contentType string) bool {
+	switch bodyLexer(contentType) {
+	case "XML", "HTML":
+		return true
+	}
+	return false
+}
+
+// splitMarkup gives markup delimiters the plain body colour, as Burp paints
+// them. chroma's XML lexer folds them into its tag tokens ("<user", "id=",
+// "</name><email>"), and the HTML lexer leaves "></" and ")</" in the
+// punctuation colour, so the same structure looked different depending on the
+// declared type. Only the delimiters move: names keep the tag colour, and the
+// text is unchanged, so marks and redaction columns still line up.
+func splitMarkup(toks []highlight.Token) []highlight.Token {
+	out := make([]highlight.Token, 0, len(toks))
+	for _, tok := range toks {
+		c := color.NRGBA{tok.R, tok.G, tok.B, 0xff}
+		var delims string
+		switch {
+		case c == burpNameTag:
+			delims = "<>/?!=" // a tag or attribute name holds none of these
+		case c == burpLineColour && strings.ContainsAny(tok.Text, "<>"):
+			delims = "<>/"
+		default:
+			out = append(out, tok)
+			continue
+		}
+		rest := tok.Text
+		for rest != "" {
+			isDelim := strings.ContainsRune(delims, rune(rest[0]))
+			n := strings.IndexFunc(rest, func(r rune) bool { return strings.ContainsRune(delims, r) != isDelim })
+			if n < 0 {
+				n = len(rest)
+			}
+			if isDelim {
+				out = append(out, colourToken(rest[:n], burpBodyText))
+			} else {
+				out = append(out, highlight.Token{Text: rest[:n], R: tok.R, G: tok.G, B: tok.B})
+			}
+			rest = rest[n:]
+		}
+	}
+	return out
 }
 
 // isFormContentType reports a declared URL-encoded body, parameters included.
@@ -331,22 +544,24 @@ func formFieldTokens(text string) []highlight.Token {
 	return toks
 }
 
-// looksFormEncoded reports k=v&k=v. Every field has to carry an '=', so a line
-// of prose with one '=' in it, or a JSON object, is not treated as a form.
+// looksFormEncoded reports k=v&k=v. Every field has to carry an '=' after a
+// name that could be URL-encoded: never empty, and without the raw spaces,
+// quotes, angle brackets or braces that a form encoder would have escaped.
+// Requiring the '=' alone let any line with one in it through — prose
+// ("total = 5"), markup (<a href="/x">), script, a JSON object.
 func looksFormEncoded(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, field := range strings.Split(s, "&") {
-		if !strings.Contains(field, "=") {
+		name, _, found := strings.Cut(field, "=")
+		if !found || name == "" || strings.ContainsAny(name, " \t<>\"{}") {
 			return false
 		}
 	}
 	return true
 }
 
-// RenderHTTP renders a side-by-side HTTP request/response evidence image.
-//
 // HTTPFacts is what RenderHTTP drew: marks are resolved inside the render, so
 // the counts a caller needs only exist here. A Facts entry for a side that was
 // never rendered keeps its zero value — Present tells the two apart.
@@ -365,6 +580,19 @@ type PanelFacts struct {
 	Present bool
 }
 
+// RenderHTTP renders HTTP evidence in Burp's palette: the request and the
+// response side by side, or one pane alone when only one side is given. Marks
+// (--mark, --mark-re, explicit spans) and redactions are found in the whole
+// capture, then each panel is trimmed to its line range or, when it has a mark
+// and Context is set, to the lines around its marks. A footnote states what
+// the trim left out and what was redacted; Caption, when set, goes above it.
+//
+// It fails when both sides are empty, when a line range matches no line of
+// its panel, and when a panel cannot be drawn (Render's errors, such as an
+// image too tall to open). Warnings go to Warn: a redaction that matched
+// nothing, a --context that replaced a line range, a view without the request
+// or status line, a compressed or binary body, and the panels' own warnings.
+// When Facts is set, it receives what the image shows.
 func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	theme := BurpTheme
 
@@ -380,20 +608,23 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	}
 
 	var reqLines, resLines []highlight.LineTokens
+	var reqLayout, resLayout httpLayout
 	var err error
 	if hasReq {
-		reqLines, err = highlight.Tokenize(cfg.Request, "http", "request.http", theme.Chroma)
+		reqLines, reqLayout, err = tokenizeHTTP(cfg.Request, theme.Chroma)
 		if err != nil {
 			return nil, fmt.Errorf("tokenize request: %w", err)
 		}
 		reqLines = burpColourMessage(reqLines)
+		cfg.warnUnreadableBody("request", cfg.Request, reqLayout)
 	}
 	if hasRes {
-		resLines, err = highlight.Tokenize(cfg.Response, "http", "response.http", theme.Chroma)
+		resLines, resLayout, err = tokenizeHTTP(cfg.Response, theme.Chroma)
 		if err != nil {
 			return nil, fmt.Errorf("tokenize response: %w", err)
 		}
 		resLines = burpColourMessage(resLines)
+		cfg.warnUnreadableBody("response", cfg.Response, resLayout)
 	}
 
 	// Literals are located in the full capture, before any trimming: --context
@@ -461,11 +692,20 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	// A 3000-line body is taller than any viewer can open, so trim to what
 	// matters. Gap bands report what was left out inside the view; the footnote
 	// reports what the view itself left out.
+	// --context replaces a panel's range only when that panel has a mark to
+	// center on, so the warning is decided here, per panel: the caller cannot
+	// know before tokenizing whether a --mark literal landed on this side.
 	reqSpec, resSpec := cfg.RequestLines, cfg.ResponseLines
 	if s := highlight.ContextSpec(reqHL, cfg.Context); s != nil {
+		if reqSpec != nil {
+			cfg.warnf("--context overrides --nr; ignoring it")
+		}
 		reqSpec = s
 	}
 	if s := highlight.ContextSpec(resHL, cfg.Context); s != nil {
+		if resSpec != nil {
+			cfg.warnf("--context overrides --ns; ignoring it")
+		}
 		resSpec = s
 	}
 	reqLines = highlight.FilterLines(reqLines, reqSpec)
@@ -483,7 +723,9 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	if hasReq && highlight.Extent(reqLines).First > 1 {
 		cfg.warnf("the request line is not in the view; the image does not show where the request was sent")
 	}
-	if hasRes && highlight.Extent(resLines).First > 1 {
+	// After an interim block (100 Continue, a proxy's "Connection established")
+	// the status that matters is the final one, and line 1 is not it.
+	if hasRes && !showsLine(resLines, resLayout.status+1) {
 		cfg.warnf("the status line is not in the view; the image does not show the response's status")
 	}
 
@@ -499,19 +741,18 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 
 	// Tabs read the whole capture, not the trimmed view: in Burp an editor tab
 	// reflects the message it holds, not how far you scrolled.
+	panel := func(title string, lines []highlight.LineTokens, hl, red highlight.Marks, raw string) *Config {
+		return &Config{
+			Lines: lines, Title: title, HighlightLines: hl, RedactRegions: red,
+			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true,
+			httpTabs: burpTabs(title, raw), Warn: cfg.Warn,
+		}
+	}
 	var pane *image.NRGBA
 	redacted := 0
 	if hasReq && hasRes {
-		req := &Config{
-			Lines: reqLines, Title: "Request", HighlightLines: reqHL, RedactRegions: reqRedact,
-			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true,
-			httpTabs: burpTabs("Request", cfg.Request), Warn: cfg.Warn,
-		}
-		res := &Config{
-			Lines: resLines, Title: "Response", HighlightLines: resHL, RedactRegions: resRedact,
-			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true,
-			httpTabs: burpTabs("Response", cfg.Response), Warn: cfg.Warn,
-		}
+		req := panel("Request", reqLines, reqHL, reqRedact, cfg.Request)
+		res := panel("Response", resLines, resHL, resRedact, cfg.Response)
 
 		reqImg, resImg, err := renderPair(req, res)
 		if err != nil {
@@ -524,19 +765,15 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	} else {
 		// One side only: the splitter would frame a pane whose other half does
 		// not exist. Render the message that is evidence.
-		single := &Config{
-			Theme: theme, Wrap: true, WrapWidth: wrapCols, HTTPMode: true, Warn: cfg.Warn,
-		}
+		var single *Config
 		if hasReq {
-			single.Title, single.Lines, single.HighlightLines, single.RedactRegions = "Request", reqLines, reqHL, reqRedact
-			single.httpTabs = burpTabs("Request", cfg.Request)
+			single = panel("Request", reqLines, reqHL, reqRedact, cfg.Request)
 		} else {
-			single.Title, single.Lines, single.HighlightLines, single.RedactRegions = "Response", resLines, resHL, resRedact
-			single.httpTabs = burpTabs("Response", cfg.Response)
+			single = panel("Response", resLines, resHL, resRedact, cfg.Response)
 		}
 		img, err := Render(single)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("render %s: %w", single.Title, err)
 		}
 		redacted = single.Redacted
 		pane = img
@@ -563,6 +800,16 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	}
 	pane = withFootnote(pane, note, theme.UI, m)
 	return withCaption(pane, cfg.Caption, theme.UI, m), nil
+}
+
+// showsLine reports whether source line n is in a filtered view.
+func showsLine(lines []highlight.LineTokens, n int) bool {
+	for _, lt := range lines {
+		if !lt.IsGap && lt.LineNum == n {
+			return true
+		}
+	}
+	return false
 }
 
 // renderPair renders both panels at the same height, so the shorter one's
@@ -641,12 +888,27 @@ type burpTab struct {
 // JSON object, so both start with the "eyJ" that encodes `{"`.
 var jwtRe = regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}`)
 
-// htmlRe recognises markup Burp's Render view can display. The opening tag
+// htmlRe recognises markup in a body that declares no type. The opening tag
 // needs a delimiter after it, or prose like "not <html-ish" counts as markup.
-var htmlRe = regexp.MustCompile(`(?i)content-type:[ \t]*text/html|<!doctype[ \t]+html|<html[ \t\r\n>]`)
+var htmlRe = regexp.MustCompile(`(?i)<!doctype[ \t]+html|<html[ \t\r\n>]`)
 
-// isHTML reports whether a response body is markup Burp could render.
-func isHTML(message string) bool { return htmlRe.MatchString(message) }
+// isHTML reports whether a response body is markup Burp could render. Burp
+// decides from the declared Content-Type, as burpBodyTokens does: a JSON API
+// that returns markup inside a string is JSON, and a browser does not render
+// it — for XSS evidence an enabled Render tab would claim otherwise. Only a
+// message without a declared type has its body sniffed.
+func isHTML(message string) bool {
+	lines := messageLines(message)
+	layout := layoutHTTP(lines)
+	if layout.contentType != "" {
+		switch mediaType(layout.contentType) {
+		case "text/html", "application/xhtml+xml":
+			return true
+		}
+		return false
+	}
+	return htmlRe.MatchString(strings.Join(lines[layout.body:], "\n"))
+}
 
 // burpTabs is the view strip Burp shows above a message editor. Burp adds an
 // editor tab per detected payload type, so a request bearing a JWT gets one.

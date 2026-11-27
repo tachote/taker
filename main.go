@@ -622,14 +622,6 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	if cmd.Context > 0 && len(reqHL) == 0 && len(resHL) == 0 && len(cmd.Mark) == 0 && len(cmd.MarkRe) == 0 {
 		return rep.fail(exitUsage, kindUsage, "--context needs --hr, --hs, --mark or --mark-re to center on")
 	}
-	if cmd.Context > 0 {
-		if cmd.ReqLines != "" {
-			rep.warn("--context overrides --nr; ignoring it")
-		}
-		if cmd.ResLines != "" {
-			rep.warn("--context overrides --ns; ignoring it")
-		}
-	}
 
 	reqLines, err := parseLineSpec("--nr", cmd.ReqLines)
 	if err != nil {
