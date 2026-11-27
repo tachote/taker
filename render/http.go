@@ -561,8 +561,6 @@ func looksFormEncoded(s string) bool {
 	return true
 }
 
-// RenderHTTP renders a side-by-side HTTP request/response evidence image.
-//
 // HTTPFacts is what RenderHTTP drew: marks are resolved inside the render, so
 // the counts a caller needs only exist here. A Facts entry for a side that was
 // never rendered keeps its zero value — Present tells the two apart.
@@ -581,6 +579,19 @@ type PanelFacts struct {
 	Present bool
 }
 
+// RenderHTTP renders HTTP evidence in Burp's palette: the request and the
+// response side by side, or one pane alone when only one side is given. Marks
+// (--mark, --mark-re, explicit spans) and redactions are found in the whole
+// capture, then each panel is trimmed to its line range or, when it has a mark
+// and Context is set, to the lines around its marks. A footnote states what
+// the trim left out and what was redacted; Caption, when set, goes above it.
+//
+// It fails when both sides are empty, when a line range matches no line of
+// its panel, and when a panel cannot be drawn (Render's errors, such as an
+// image too tall to open). Warnings go to Warn: a redaction that matched
+// nothing, a --context that replaced a line range, a view without the request
+// or status line, a compressed or binary body, and the panels' own warnings.
+// When Facts is set, it receives what the image shows.
 func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	theme := BurpTheme
 
