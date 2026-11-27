@@ -10,21 +10,31 @@ Produces VS Code Dark+-styled PNG images with syntax highlighting, line numbers,
 
 ### Download binary (recommended)
 
-Download the latest release for your platform from the [releases page](https://github.com/tachote/taker/releases):
+Download the latest release for your platform from the [releases page](https://github.com/tachote/taker/releases). taker produces audit evidence, so verify the archive against the release's `checksums.txt` before you install it:
 
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/tachote/taker/releases/latest/download/taker_Darwin_arm64.tar.gz | tar xz
-sudo mv taker /usr/local/bin/
+# Pick the archive for your platform:
+#   taker_darwin_arm64.tar.gz   macOS (Apple Silicon)
+#   taker_darwin_amd64.tar.gz   macOS (Intel)
+#   taker_linux_amd64.tar.gz    Linux (x86_64)
+#   taker_linux_arm64.tar.gz    Linux (arm64)
+#   taker_windows_amd64.zip     Windows (x86_64)
+ASSET=taker_darwin_arm64.tar.gz
+BASE=https://github.com/tachote/taker/releases/latest/download
 
-# macOS (Intel)
-curl -L https://github.com/tachote/taker/releases/latest/download/taker_Darwin_x86_64.tar.gz | tar xz
-sudo mv taker /usr/local/bin/
-
-# Linux (amd64)
-curl -L https://github.com/tachote/taker/releases/latest/download/taker_Linux_x86_64.tar.gz | tar xz
-sudo mv taker /usr/local/bin/
+# Each step runs only if the previous one succeeded: a failed download or a
+# checksum mismatch stops the install before anything is extracted.
+# Linux: use `sha256sum --ignore-missing -c checksums.txt` instead of shasum.
+curl -fLO "$BASE/$ASSET" &&
+  curl -fLO "$BASE/checksums.txt" &&
+  shasum -a 256 --ignore-missing -c checksums.txt &&
+  tar xzf "$ASSET" taker &&
+  sudo mv taker /usr/local/bin/
 ```
+
+If the check prints `FAILED`, do not install: delete the archive and download it again.
+
+On Windows, compare the `Get-FileHash -Algorithm SHA256 taker_windows_amd64.zip` output with the `taker_windows_amd64.zip` line in `checksums.txt`. Extract `taker.exe` only if the two hashes are identical; if they differ, delete the zip and do not run anything from it.
 
 ### go install
 
