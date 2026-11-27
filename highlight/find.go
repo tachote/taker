@@ -170,11 +170,18 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 
 // KeepSpans shifts every span's start right by n, so a redaction can leave the
 // first characters of a secret legible ("sk_l…") while the box still says
-// where the rest was. Spans consumed entirely are dropped; a whole-line span
-// is not a redaction candidate and is dropped too.
-func KeepSpans(m Marks, n int) Marks {
+// where the rest was. A whole-line span is not a redaction candidate and is
+// dropped.
+//
+// A span n or fewer characters long has nothing left to hide, so it is dropped
+// too — and that is a secret drawn in full. consumed counts those spans so the
+// caller can refuse or warn: a regex match or a non-ASCII literal can be
+// shorter than keep even when every byte-length check upstream passed, and a
+// redaction that silently exposes one of five matches looks exactly like one
+// that hid all five.
+func KeepSpans(m Marks, n int) (kept Marks, consumed int) {
 	if n <= 0 {
-		return m
+		return m, 0
 	}
 	out := Marks{}
 	for ln, spans := range m {
@@ -185,11 +192,13 @@ func KeepSpans(m Marks, n int) Marks {
 			sp.Start += n
 			if sp.Start <= sp.End {
 				out[ln] = append(out[ln], sp)
+			} else {
+				consumed++
 			}
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, consumed
 	}
-	return out
+	return out, consumed
 }

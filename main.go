@@ -409,7 +409,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	// hidden in the excerpt, not only in the lines the image ends up showing.
 	redact, redactStats := highlight.FindMarks(msgs, slices.Concat(cmd.Redact, rep.redactFrags(cmd.RedactKeep)), 0)
 	redactReM, redactReStats := highlight.FindRegexMarks(msgs, redactRe, 0)
-	redactMarks := highlight.KeepSpans(redact[0].Merge(redactReM[0]), cmd.RedactKeep)
+	redactMarks, _ := highlight.KeepSpans(redact[0].Merge(redactReM[0]), cmd.RedactKeep)
 	matched := 0
 	for _, st := range redactStats {
 		matched += st.Matches
@@ -1026,7 +1026,7 @@ func termRedact(lines []highlight.LineTokens, needles []string, res []*regexp.Re
 	found, stats := highlight.FindMarks([][]highlight.LineTokens{lines}, needles, 0)
 	foundRe, reStats := highlight.FindRegexMarks([][]highlight.LineTokens{lines}, res, 0)
 	stats = append(stats, reStats...)
-	kept := highlight.KeepSpans(found[0].Merge(foundRe[0]), keep)
+	kept, _ := highlight.KeepSpans(found[0].Merge(foundRe[0]), keep)
 	matched := 0
 	for i, st := range stats {
 		matched += st.Matches

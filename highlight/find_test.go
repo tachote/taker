@@ -117,14 +117,58 @@ func TestKeepSpans(t *testing.T) {
 		4: {{Start: 1, End: 3}},
 		5: {{}},
 	}
-	got := KeepSpans(m, 4)
+	got, consumed := KeepSpans(m, 4)
+	if consumed != 1 {
+		t.Errorf("consumed = %d, want 1 (line 4; the whole-line span is not a redaction)", consumed)
+	}
 	if len(got) != 1 || len(got[3]) != 1 {
 		t.Fatalf("KeepSpans kept %v, want only line 3", got)
 	}
 	if got[3][0] != (Span{Start: 9, End: 20}) {
 		t.Errorf("span = %v, want {9 20}", got[3][0])
 	}
-	if KeepSpans(m, 0) == nil {
+	if got, consumed := KeepSpans(m, 0); got == nil || consumed != 0 {
 		t.Error("keep 0 should return the map untouched")
+	}
+}
+
+// The CLI's per-literal guard measured bytes: "ñññññ" is 10 bytes, so keep 5
+// passed it while the span (5 characters) was consumed whole and the secret
+// drew in full. The count is what lets a caller catch that without guessing
+// the unit.
+func TestKeepSpansCountsMultibyteConsumed(t *testing.T) {
+	lines, err := Tokenize("user=ñññññ\ntoken=abcdefghijkl\n", "text", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, _ := FindMarks([][]LineTokens{lines}, []string{"ñññññ", "abcdefghijkl"}, 0)
+	kept, consumed := KeepSpans(found[0], 5)
+	if consumed != 1 {
+		t.Errorf("consumed = %d, want 1: the 5-character literal is exposed whole", consumed)
+	}
+	if kept.Has(1) {
+		t.Errorf("line 1 kept a span %v; keep 5 of 5 characters hides nothing", kept[1])
+	}
+	if got := kept[2]; len(got) != 1 || got[0] != (Span{Start: 12, End: 18}) {
+		t.Errorf("line 2 = %v, want {12 18}", got)
+	}
+}
+
+// One pattern, two match lengths: the short match is consumed, the long one is
+// shortened. Before the count, the all-or-nothing check upstream saw one span
+// left and reported nothing about the one drawn in full.
+func TestKeepSpansCountsShortRegexMatches(t *testing.T) {
+	lines, err := Tokenize("a=tok_ab\nb=tok_abcdefghij\n", "text", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	re := regexp.MustCompile("tok_[a-z]+")
+	found, _ := FindRegexMarks([][]LineTokens{lines}, []*regexp.Regexp{re}, 0)
+	kept, consumed := KeepSpans(found[0], 6)
+	if consumed != 1 {
+		t.Errorf("consumed = %d, want 1 (tok_ab is 6 characters)", consumed)
+	}
+	if kept.Has(1) || !kept.Has(2) {
+		t.Errorf("kept lines = %v, want only line 2", kept.Lines())
 	}
 }

@@ -430,7 +430,7 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 	redactRe, redactReStats := highlight.FindRegexMarks(msgs, cfg.RedactRe, 0)
 	var reqRedact, resRedact highlight.Marks
 	for i, side := range sideOf {
-		m := highlight.KeepSpans(redact[i].Merge(redactRe[i]), cfg.RedactKeep)
+		m, _ := highlight.KeepSpans(redact[i].Merge(redactRe[i]), cfg.RedactKeep)
 		if side == 0 {
 			reqRedact = reqRedact.Merge(m)
 		} else {
