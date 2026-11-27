@@ -349,3 +349,48 @@ func TestTokenRe(t *testing.T) {
 		}
 	}
 }
+
+// A --redact-re match in a file name is a secret too. Failures that came
+// before the pattern was compiled skipped the regex scrub, so the name
+// travelled in clear through command, source.path and error.message.
+func TestRedactReScrubsEarlyFailures(t *testing.T) {
+	const name = "tok_ABC123"
+	for _, tc := range []struct {
+		label string
+		args  []string
+	}{
+		{"bad --first-line", []string{"snap", name + ".py", "--redact-re", "tok_[A-Z0-9]+", "--first-line", "0", "-o", "x.png", "--json"}},
+		{"missing file", []string{"snap", "tok_ZZZ999.py", "--redact-re", "tok_[A-Z0-9]+", "-o", "x.png", "--json"}},
+		{"json and toon", []string{"snap", name + ".py", "--redact-re", "tok_[A-Z0-9]+", "--json", "--toon"}},
+		{"term missing file", []string{"term", "tok_ZZZ999.log", "--redact-re", "tok_[A-Z0-9]+", "--json"}},
+		{"http bad flag combo", []string{"http", "-f", name + ".http", "-r", name + ".http", "--redact-re", "tok_[A-Z0-9]+", "--json"}},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, name+".py"), []byte("x = 1\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			code, stdout, stderr := runTaker(t, dir, tc.args...)
+			if code == exitOK {
+				t.Fatalf("exit 0, want a failure\n%s", stdout)
+			}
+			for _, leak := range []string{name, "tok_ZZZ999"} {
+				if strings.Contains(stdout, leak) || strings.Contains(stderr, leak) {
+					t.Errorf("%q leaked\nstdout:\n%s\nstderr:\n%s", leak, stdout, stderr)
+				}
+			}
+		})
+	}
+}
+
+// A pattern that does not compile is still a usage error naming the flag.
+func TestRedactReBadPatternIsUsage(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.py"), []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, stdout, _ := runTaker(t, dir, "a.py", "--redact-re", "tok_(", "--json")
+	if code != exitUsage || !strings.Contains(stdout, "parse --redact-re") {
+		t.Errorf("exit = %d, want 2 naming --redact-re\n%s", code, stdout)
+	}
+}

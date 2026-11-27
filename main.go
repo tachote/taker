@@ -243,15 +243,26 @@ func main() {
 	rep.rep.Command = strings.Join(os.Args, " ")
 	// Parse succeeded, so the needles are already known — register them before
 	// any failure path below can echo the command.
+	var redactLits, redactRes []string
 	switch mode {
 	case "http":
-		rep.setSecrets(slices.Concat(cli.HTTP.Redact, cli.HTTP.RedactRe))
+		redactLits, redactRes = cli.HTTP.Redact, cli.HTTP.RedactRe
 	case "exec":
-		rep.setSecrets(slices.Concat(cli.Exec.Redact, cli.Exec.RedactRe))
+		redactLits, redactRes = cli.Exec.Redact, cli.Exec.RedactRe
 	case "term":
-		rep.setSecrets(slices.Concat(cli.Term.Redact, cli.Term.RedactRe))
+		redactLits, redactRes = cli.Term.Redact, cli.Term.RedactRe
 	default:
-		rep.setSecrets(slices.Concat(cli.Snap.Redact, cli.Snap.RedactRe))
+		redactLits, redactRes = cli.Snap.Redact, cli.Snap.RedactRe
+	}
+	rep.setSecrets(slices.Concat(redactLits, redactRes))
+	// The pattern text is a secret already; its MATCHES are too — a token in
+	// the input's file name leaks through the command, source.path and an
+	// "open tok_…: no such file" error on any failure before the run* compile.
+	// A pattern that does not compile is left for the run* function, which
+	// reports it as the usage error it is.
+	if res, err := compileRegex("--redact-re", redactRes); err == nil {
+		rep.secretRes = res
+		rep.scrubSecrets()
 	}
 	if jsonOut && toonOut {
 		rep.helpf("pick one: --json or --toon")
@@ -287,6 +298,10 @@ func newParser() *kong.Kong {
 func runSnap(cmd *SnapCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
 	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
+		return code
+	}
+	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
+	if code != 0 {
 		return code
 	}
 	for _, c := range [][2]any{
@@ -398,14 +413,6 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
-	redactRe, err := compileRegex("--redact-re", cmd.RedactRe)
-	if err != nil {
-		return rep.fail(exitUsage, kindUsage, "%v", err)
-	}
-	// The compiled patterns join the scrubber: their matches are secrets the
-	// literal list never named — a token caught in a filename or a warning
-	// stays hidden only if the pattern itself does the masking.
-	rep.secretRes = redactRe
 	msgs := [][]highlight.LineTokens{all}
 	marked, stats := highlight.FindMarks(msgs, cmd.Mark, cmd.MaxMarks)
 	reMarked, reStats := highlight.FindRegexMarks(msgs, markRe, cmd.MaxMarks)
@@ -529,6 +536,10 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
 		return code
 	}
+	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
+	if code != 0 {
+		return code
+	}
 	for _, c := range [][2]any{
 		{"--context", cmd.Context}, {"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks},
 	} {
@@ -634,14 +645,6 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
-	redactRe, err := compileRegex("--redact-re", cmd.RedactRe)
-	if err != nil {
-		return rep.fail(exitUsage, kindUsage, "%v", err)
-	}
-	// The compiled patterns join the scrubber: their matches are secrets the
-	// literal list never named — a token caught in a filename or a warning
-	// stays hidden only if the pattern itself does the masking.
-	rep.secretRes = redactRe
 
 	// --mark's matches are found while rendering, so they count here too.
 	if cmd.Context > 0 && len(reqHL) == 0 && len(resHL) == 0 && len(cmd.Mark) == 0 && len(cmd.MarkRe) == 0 {
@@ -787,6 +790,21 @@ func startLine(src []byte) string {
 		first = src[:i]
 	}
 	return strings.TrimSpace(string(first))
+}
+
+// compileRedactRe compiles --redact-re before anything else in a run can fail
+// and hands the patterns to the scrubber. Their matches are secrets the
+// literal list never named — a token caught in a file name, the source path
+// or an error message stays hidden only if the pattern itself does the
+// masking, and a failure that came before the compile used to skip it.
+func compileRedactRe(rep *reporter, patterns []string) ([]*regexp.Regexp, int) {
+	res, err := compileRegex("--redact-re", patterns)
+	if err != nil {
+		return nil, rep.fail(exitUsage, kindUsage, "%v", err)
+	}
+	rep.secretRes = res
+	rep.scrubSecrets()
+	return res, 0
 }
 
 // compileRegex compiles a flag's patterns once, at the CLI edge, so a bad
@@ -1219,6 +1237,10 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
 		return code
 	}
+	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
+	if code != 0 {
+		return code
+	}
 	for _, c := range [][2]any{
 		{"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks}, {"--timeout", cmd.Timeout},
 	} {
@@ -1343,14 +1365,6 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
-	redactRe, err := compileRegex("--redact-re", cmd.RedactRe)
-	if err != nil {
-		return rep.fail(exitUsage, kindUsage, "%v", err)
-	}
-	// The compiled patterns join the scrubber: their matches are secrets the
-	// literal list never named — a token caught in a filename or a warning
-	// stays hidden only if the pattern itself does the masking.
-	rep.secretRes = redactRe
 
 	// The hash covers the text that was matched and drawn, as snap and http
 	// do: the raw transcript still holds an ANSI-spliced secret in clear, and
@@ -1385,6 +1399,10 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 func runTerm(cmd *TermCmd, rep *reporter) int {
 	rep.setSecretsAll(slices.Concat(cmd.Redact, cmd.RedactRe), cmd.Redact)
 	if code := validateRedact(rep, cmd.Redact, cmd.RedactRe, cmd.RedactKeep); code != 0 {
+		return code
+	}
+	redactRe, code := compileRedactRe(rep, cmd.RedactRe)
+	if code != 0 {
 		return code
 	}
 	for _, c := range [][2]any{
@@ -1432,14 +1450,6 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	if err != nil {
 		return rep.fail(exitUsage, kindUsage, "%v", err)
 	}
-	redactRe, err := compileRegex("--redact-re", cmd.RedactRe)
-	if err != nil {
-		return rep.fail(exitUsage, kindUsage, "%v", err)
-	}
-	// The compiled patterns join the scrubber: their matches are secrets the
-	// literal list never named — a token caught in a filename or a warning
-	// stays hidden only if the pattern itself does the masking.
-	rep.secretRes = redactRe
 
 	// Normalized, then masked — the same rule as every other mode. The raw
 	// file's sum would equal `sha256sum <file>` and verify guesses at a secret
