@@ -106,7 +106,7 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 		// and no fixed run of spaces stands for it either: how many a tab
 		// became depends on its column. Each tab matches a run of spaces.
 		find := func(msg []LineTokens) Marks { return FindLiteral(msg, needle) }
-		if strings.Contains(needle, "\t") {
+		if strings.Contains(needle, "\t") && utf8.ValidString(needle) {
 			re := tabNeedle(needle)
 			find = func(msg []LineTokens) Marks { return findRegex(msg, re) }
 		}

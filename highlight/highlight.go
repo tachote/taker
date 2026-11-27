@@ -171,7 +171,10 @@ func (lt LineTokens) Text() string {
 // "7:63-85" is error-prone, whereas pasting the secret you just found is the
 // thing an analyst already has in the clipboard.
 func FindLiteral(lines []LineTokens, needle string) Marks {
-	if needle == "" {
+	// The drawn text is valid UTF-8 (chroma lexes runes), so a needle that is
+	// not can never match a whole character — but its stray bytes could match
+	// inside one, and the columns counted from there would be wrong.
+	if needle == "" || !utf8.ValidString(needle) {
 		return nil
 	}
 	n := utf8.RuneCountInString(needle)

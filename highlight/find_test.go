@@ -226,3 +226,16 @@ func TestMarkStatsKept(t *testing.T) {
 		t.Errorf("regex kept lines = %v, want [2 2 3]", got)
 	}
 }
+
+// A needle with bytes that are not UTF-8 cannot match the drawn text, which is
+// all valid runes. It must count as no match — not match inside "é", and not
+// panic compiling the pattern a tab needle becomes.
+func TestFindMarksInvalidNeedle(t *testing.T) {
+	lines := linesOf("café\tx")
+	_, stats := FindMarks([][]LineTokens{lines}, []string{"\xa9", "\xa9\tx"}, 0)
+	for _, st := range stats {
+		if st.Matches != 0 {
+			t.Errorf("needle %q matched %d times, want none", st.Literal, st.Matches)
+		}
+	}
+}
