@@ -42,7 +42,7 @@ On Windows, compare the `Get-FileHash -Algorithm SHA256 taker_windows_amd64.zip`
 go install github.com/tachote/taker@latest
 ```
 
-Requires Go 1.22+.
+Requires Go 1.26 or newer. An older `go` with the default `GOTOOLCHAIN=auto` downloads the Go 1.26.11 toolchain that `go.mod` names and builds with it.
 
 ### Build from source
 
