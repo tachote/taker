@@ -1,0 +1,26 @@
+tool: taker
+version: golden
+mode: snap
+ok: true
+exit: 0
+output: $DIR/out.png
+bytes: 0
+width: 0
+height: 0
+command: taker snap auth.py -o out.png -m db.query -m nowhere --redact <redacted> --toon
+generated: "2026-01-01T00:00:00Z"
+source:
+  kind: file
+  path: auth.py
+crop:
+  first: 2
+  last: 3
+  shown: 2
+  total: 3
+sha256[1]{name,sum}:
+  source,0f8a5059d7644ac9e04ace0126e30d668b32a67f5aead4ce8a2f401d1d01a956
+redactions: 3
+marks[2]{needle,matches,lines,kept,dropped,shown}:
+  db.query,1,1,1,0,1
+  nowhere,0,0,0,0,0
+warnings[1]: "--mark \"nowhere\" matched nothing"

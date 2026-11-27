@@ -11,6 +11,11 @@ import (
 // font.Face.GlyphAdvance reports ok for a missing rune (it falls back to
 // .notdef), so it cannot be used to verify a codepoint exists.
 //
+// The file is a subset of the Nerd Fonts release font holding only the
+// codepoints the renderer draws (2.3 MB down to 33 KB of binary). Adding or
+// changing an icon means re-running font/subset.sh against the full font;
+// TestIconGlyphsExist fails until that is done.
+//
 //go:embed SymbolsNerdFontMono-Regular.ttf
 var SymbolsTTF []byte
 

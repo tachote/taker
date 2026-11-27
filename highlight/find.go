@@ -3,6 +3,7 @@ package highlight
 import (
 	"fmt"
 	"regexp"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -32,6 +33,49 @@ type MarkStats struct {
 	Matches int    // occurrences across every message
 	Lines   int    // distinct lines carrying at least one occurrence
 	Dropped int    // occurrences a limit left out
+	// Kept is every occurrence the limit kept, earliest first. Matches counts
+	// the whole input, and a view trimmed by --lines or --context can show
+	// fewer: the caller needs the positions to say how many are really in
+	// the image.
+	Kept []ScopedSpan
+}
+
+// KeptLines returns the line of each kept occurrence in message msg, earliest
+// first; a line appears once per occurrence on it.
+func (s MarkStats) KeptLines(msg int) []int {
+	var out []int
+	for _, k := range s.Kept {
+		if k.Message == msg {
+			out = append(out, k.Line)
+		}
+	}
+	return out
+}
+
+// Shown counts the kept occurrences whose line is in the view of their
+// message; views[i] is what message i renders, gaps included or not. Kept
+// counts the whole input, so a --lines or --context trim can leave a kept
+// match out of the image — Shown is the number the image really boxes.
+func (s MarkStats) Shown(views ...[]LineTokens) int {
+	in := make([]map[int]bool, len(views))
+	n := 0
+	for _, k := range s.Kept {
+		if k.Message < 0 || k.Message >= len(views) {
+			continue
+		}
+		if in[k.Message] == nil {
+			in[k.Message] = map[int]bool{}
+			for _, lt := range views[k.Message] {
+				if !lt.IsGap {
+					in[k.Message][lt.LineNum] = true
+				}
+			}
+		}
+		if in[k.Message][k.Line] {
+			n++
+		}
+	}
+	return n
 }
 
 func (s MarkStats) flag() string {
@@ -83,17 +127,23 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 		}
 		seen[needle] = true
 		st := MarkStats{Literal: needle, Flag: "--mark"}
-		// The token text has tabs expanded to four spaces — a needle that
-		// still holds a literal tab can never match what the reader sees.
-		needle = expandTabs(needle, 4)
+		// The token text has tabs expanded to their tab stops, so a needle
+		// that still holds a literal tab can never match what the reader sees,
+		// and no fixed run of spaces stands for it either: how many a tab
+		// became depends on its column. Each tab matches a run of spaces.
+		find := func(msg []LineTokens) Marks { return FindLiteral(msg, needle) }
+		if strings.Contains(needle, "\t") && utf8.ValidString(needle) {
+			re := tabNeedle(needle)
+			find = func(msg []LineTokens) Marks { return findRegex(msg, re) }
+		}
 
-		// Collect in message-then-line order: FindLiteral returns a map, and
+		// Collect in message-then-line order: the finders return a map, and
 		// "the first 5 matches" has to mean the earliest ones a reader would
 		// find scrolling down the image.
 		var hits []ScopedSpan
 		lines := map[[2]int]bool{}
 		for mi, msg := range messages {
-			found := FindLiteral(msg, needle)
+			found := find(msg)
 			for _, ln := range found.Lines() {
 				lines[[2]int{mi, ln}] = true
 				for _, sp := range found[ln] {
@@ -107,6 +157,7 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 			st.Dropped = len(hits) - limit
 			hits = hits[:limit]
 		}
+		st.Kept = hits
 		for _, h := range hits {
 			if out[h.Message] == nil {
 				out[h.Message] = Marks{}
@@ -119,8 +170,8 @@ func FindMarks(messages [][]LineTokens, needles []string, limit int) ([]Marks, [
 }
 
 // FindRegexMarks is FindMarks for compiled patterns. Match offsets are byte
-// offsets while spans count characters, so each match is re-measured — a span
-// that counted bytes would drift right on any line holding non-ASCII text.
+// offsets while spans count characters, so each match is measured in runes — a
+// span that counted bytes would drift right on any line holding non-ASCII text.
 // Zero-width matches are skipped: an empty box points at nothing.
 func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit int) ([]Marks, []MarkStats) {
 	out := make([]Marks, len(messages))
@@ -135,19 +186,11 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 		var hits []ScopedSpan
 		lines := map[[2]int]bool{}
 		for mi, msg := range messages {
-			for _, lt := range msg {
-				if lt.IsGap {
-					continue
-				}
-				text := lt.Text()
-				for _, loc := range re.FindAllStringIndex(text, -1) {
-					if loc[0] == loc[1] {
-						continue
-					}
-					start := utf8.RuneCountInString(text[:loc[0]]) + 1
-					end := utf8.RuneCountInString(text[:loc[1]])
-					hits = append(hits, ScopedSpan{Message: mi, Line: lt.LineNum, Span: Span{Start: start, End: end}})
-					lines[[2]int{mi, lt.LineNum}] = true
+			found := findRegex(msg, re)
+			for _, ln := range found.Lines() {
+				lines[[2]int{mi, ln}] = true
+				for _, sp := range found[ln] {
+					hits = append(hits, ScopedSpan{Message: mi, Line: ln, Span: sp})
 				}
 			}
 		}
@@ -157,6 +200,7 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 			st.Dropped = len(hits) - limit
 			hits = hits[:limit]
 		}
+		st.Kept = hits
 		for _, h := range hits {
 			if out[h.Message] == nil {
 				out[h.Message] = Marks{}
@@ -168,13 +212,59 @@ func FindRegexMarks(messages [][]LineTokens, patterns []*regexp.Regexp, limit in
 	return out, stats
 }
 
+// findRegex returns every non-empty match of re on the given lines, in rune
+// columns. Matches come in order and never overlap, so the column is carried
+// forward from the previous match instead of being recounted from column 1:
+// that recount made a one-line JSON body quadratic in its length.
+func findRegex(lines []LineTokens, re *regexp.Regexp) Marks {
+	var found Marks
+	for _, lt := range lines {
+		if lt.IsGap {
+			continue
+		}
+		text := lt.Text()
+		prev, col := 0, 0
+		for _, loc := range re.FindAllStringIndex(text, -1) {
+			if loc[0] == loc[1] {
+				continue
+			}
+			col += utf8.RuneCountInString(text[prev:loc[0]])
+			start := col + 1
+			col += utf8.RuneCountInString(text[loc[0]:loc[1]])
+			prev = loc[1]
+			if found == nil {
+				found = Marks{}
+			}
+			found[lt.LineNum] = append(found[lt.LineNum], Span{Start: start, End: col})
+		}
+	}
+	return found
+}
+
+// tabNeedle compiles a literal needle that holds tabs into a pattern where
+// each tab matches the run of spaces it became when the text was expanded.
+func tabNeedle(needle string) *regexp.Regexp {
+	parts := strings.Split(needle, "\t")
+	for i, p := range parts {
+		parts[i] = regexp.QuoteMeta(p)
+	}
+	return regexp.MustCompile(strings.Join(parts, " +"))
+}
+
 // KeepSpans shifts every span's start right by n, so a redaction can leave the
 // first characters of a secret legible ("sk_l…") while the box still says
-// where the rest was. Spans consumed entirely are dropped; a whole-line span
-// is not a redaction candidate and is dropped too.
-func KeepSpans(m Marks, n int) Marks {
+// where the rest was. A whole-line span is not a redaction candidate and is
+// dropped.
+//
+// A span n or fewer characters long has nothing left to hide, so it is dropped
+// too — and that is a secret drawn in full. consumed counts those spans so the
+// caller can refuse or warn: a regex match or a non-ASCII literal can be
+// shorter than keep even when every byte-length check upstream passed, and a
+// redaction that silently exposes one of five matches looks exactly like one
+// that hid all five.
+func KeepSpans(m Marks, n int) (kept Marks, consumed int) {
 	if n <= 0 {
-		return m
+		return m, 0
 	}
 	out := Marks{}
 	for ln, spans := range m {
@@ -185,11 +275,13 @@ func KeepSpans(m Marks, n int) Marks {
 			sp.Start += n
 			if sp.Start <= sp.End {
 				out[ln] = append(out[ln], sp)
+			} else {
+				consumed++
 			}
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, consumed
 	}
-	return out
+	return out, consumed
 }

@@ -3,6 +3,7 @@ package render
 import (
 	"fmt"
 	"image/color"
+	"math"
 
 	"github.com/alecthomas/chroma/v2"
 	"github.com/alecthomas/chroma/v2/styles"
@@ -17,10 +18,8 @@ type UIColors struct {
 	TabBorder color.NRGBA
 	TabAccent color.NRGBA
 	TabText   color.NRGBA
-	// ControlActive is the plate Burp fills behind an active toolbar toggle.
-	ControlActive color.NRGBA
-	LineNumFg     color.NRGBA
-	GutterSep     color.NRGBA
+	LineNumFg color.NRGBA
+	GutterSep color.NRGBA
 	// Splitter and SplitterShade are the two hairline columns Burp draws between
 	// the Request and Response panes: a light edge with a darker one behind it.
 	// They are hairlines, not a filled band, and they run the full height of the
@@ -45,6 +44,52 @@ type Theme struct {
 }
 
 func rgb(r, g, b uint8) color.NRGBA { return color.NRGBA{r, g, b, 0xff} }
+
+// luminance is the WCAG 2 relative luminance of an opaque colour.
+func luminance(c color.NRGBA) float64 {
+	ch := func(v uint8) float64 {
+		s := float64(v) / 255
+		if s <= 0.03928 {
+			return s / 12.92
+		}
+		return math.Pow((s+0.055)/1.055, 2.4)
+	}
+	return 0.2126*ch(c.R) + 0.7152*ch(c.G) + 0.0722*ch(c.B)
+}
+
+// contrast is the WCAG 2 contrast ratio between two opaque colours, 1 to 21.
+func contrast(a, b color.NRGBA) float64 {
+	la, lb := luminance(a), luminance(b)
+	if la < lb {
+		la, lb = lb, la
+	}
+	return (la + 0.05) / (lb + 0.05)
+}
+
+// minToolContrast is WCAG AA for body text. The footnote and the gap label
+// are the tool speaking — provenance, crop extent, redactions, skipped lines —
+// and a dim theme grey left some of them near 2:1.
+const minToolContrast = 4.5
+
+// readable returns fg, or fg moved toward strong in 5% steps until it reaches
+// minToolContrast on bg. If strong itself falls short, it keeps going toward
+// black or white, whichever bg sets off better. A colour that already reads is
+// returned unchanged, so a theme only shifts where it was hard to read.
+func readable(fg, strong, bg color.NRGBA) color.NRGBA {
+	extreme := rgb(0xff, 0xff, 0xff)
+	if contrast(rgb(0, 0, 0), bg) > contrast(extreme, bg) {
+		extreme = rgb(0, 0, 0)
+	}
+	for _, to := range []color.NRGBA{strong, extreme} {
+		for i := 0; i <= 20; i++ {
+			if c := mix(fg, to, float64(i)/20); contrast(c, bg) >= minToolContrast {
+				return c
+			}
+		}
+		fg = to
+	}
+	return fg
+}
 
 // Standard red highlights work across all dark themes.
 var redHighlight = struct{ bg, border color.NRGBA }{
@@ -171,6 +216,28 @@ func builtinStyle(name string) *chroma.Style {
 	return s
 }
 
+// withText gives a style the plain-text colour it leaves unset. Identifiers
+// and whole terminal transcripts are Text tokens, and a style without a Text
+// colour makes the highlighter fall back to a grey picked for dark themes —
+// near-invisible on a light background.
+func withText(s *chroma.Style, fg string) *chroma.Style {
+	b := s.Builder()
+	b.Add(chroma.Text, fg)
+	b.Add(chroma.Background, "bg:"+hexBg(s)+" "+fg)
+	out, err := b.Build()
+	if err != nil {
+		panic(fmt.Sprintf("theme: style %q: %v", s.Name, err))
+	}
+	return out
+}
+
+// hexBg is the style's own background, kept as is when withText adds a
+// foreground to the same entry.
+func hexBg(s *chroma.Style) string {
+	c := s.Get(chroma.Background).Background
+	return fmt.Sprintf("#%02x%02x%02x", c.Red(), c.Green(), c.Blue())
+}
+
 // ── Theme definitions ────────────────────────────────────────────────────────
 
 var Themes = map[string]*Theme{
@@ -189,7 +256,6 @@ var Themes = map[string]*Theme{
 			TabBorder:       rgb(0x52, 0x52, 0x55),
 			TabAccent:       rgb(0xcc, 0x68, 0x3d),
 			TabText:         rgb(0xff, 0xff, 0xff),
-			ControlActive:   rgb(0x37, 0x63, 0x99),
 			LineNumFg:       rgb(0xa0, 0xa0, 0xa0),
 			GutterSep:       rgb(0x55, 0x55, 0x55),
 			Splitter:        rgb(0x52, 0x52, 0x55),
@@ -279,8 +345,10 @@ var Themes = map[string]*Theme{
 	// the page. The palette is GitHub's light canvas — code bg stays pure
 	// white so the pasted image borders itself.
 	"github-light": {
-		Name:   "GitHub Light",
-		Chroma: builtinStyle("github"),
+		Name: "GitHub Light",
+		// chroma's github style sets no Text colour; #1f2328 is GitHub's own
+		// foreground, the same ink as TabText below.
+		Chroma: withText(builtinStyle("github"), "#1f2328"),
 		UI: UIColors{
 			Bg:            rgb(0xff, 0xff, 0xff),
 			ChromeBg:      rgb(0xea, 0xec, 0xf0),

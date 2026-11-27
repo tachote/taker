@@ -17,11 +17,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      # setup-go v6 reads go.mod's toolchain line, not only the go line.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
+
+      # The binaries carry this Go's standard library, and scanners judge a
+      # release by it: ship only with the toolchain go.mod pins, the one CI
+      # tested and govulncheck scanned.
+      - name: Check the Go toolchain
+        run: |
+          want="$(go mod edit -json | jq -r '.Toolchain // empty')"
+          have="$(go env GOVERSION)"
+          test -z "$want" || test "$want" = "$have" || { echo "go is $have, go.mod pins $want"; exit 1; }
 
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6

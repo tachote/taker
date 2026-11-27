@@ -1,9 +1,12 @@
 package render
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"image/color"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -59,7 +62,7 @@ func TestRenderPairEqualisesHeight(t *testing.T) {
 		t.Fatalf("panel heights differ: %d vs %d", a.Bounds().Dy(), b.Bounds().Dy())
 	}
 
-	out := composeHTTP(a, b, BurpTheme.UI)
+	out := composeHTTP(a, b, 0, BurpTheme.UI)
 	wantW := a.Bounds().Dx() + httpDividerW + b.Bounds().Dx()
 	if out.Bounds().Dx() != wantW {
 		t.Errorf("composed width %d, want %d", out.Bounds().Dx(), wantW)
@@ -180,7 +183,7 @@ func TestHTTPIsAlwaysBurp(t *testing.T) {
 
 var httpConfigFields = []string{
 	"Request", "Response", "RequestHL", "ResponseHL", "Mark", "MarkRe", "MaxMarks",
-	"Redact", "RedactRe", "RedactKeep", "RedactAsked", "Caption",
+	"Redact", "RedactRe", "RedactFrag", "RedactKeep", "RedactAsked", "Caption",
 	"RequestLines", "ResponseLines", "Context", "WrapWidth",
 	// An out-parameter, not a knob: the renderer writes what it drew into it so
 	// the machine-readable report and the image's own footnote cannot disagree.
@@ -345,7 +348,7 @@ func TestBurpJSONFramingIsPlainText(t *testing.T) {
 		colourToken(`"test"`, burpString),
 		colourToken(",", burpLineColour),
 	}
-	got := burpBodyTokens(`    "user":"test",`, lexed, "application/json")
+	got := burpBodyTokens(`    "user":"test",`, lexed, "application/json", false)
 	want := []highlight.Token{lexed[0], lexed[1], colourToken(":", burpBodyText), lexed[3], colourToken(",", burpBodyText)}
 	if len(got) != len(want) {
 		t.Fatalf("got %d tokens, want %d", len(got), len(want))
@@ -615,5 +618,425 @@ func TestHTTPRedact(t *testing.T) {
 	}
 	if facts.Redacted == 0 {
 		t.Error("no redaction box drawn for a literal in the capture")
+	}
+}
+
+// A RedactKeep at least as long as one match would draw that match in full.
+// The renderer refuses with a typed error instead of drawing four boxes and
+// one secret; the old warning fired only when every match was consumed.
+func TestHTTPRedactKeepRefusesAnExposedMatch(t *testing.T) {
+	re := regexp.MustCompile(`sid=[a-z]+|"pass":"[a-z0-9]+"`)
+	_, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RedactRe: []*regexp.Regexp{re}, RedactKeep: 7, // "sid=abc" is 7 chars
+	})
+	var keepErr *RedactKeepError
+	if !errors.As(err, &keepErr) {
+		t.Fatalf("err = %v, want a *RedactKeepError", err)
+	}
+	if keepErr.Keep != 7 || keepErr.Exposed != 1 {
+		t.Errorf("err = %+v, want keep 7 with 1 exposed match", keepErr)
+	}
+	// Under the length of every match, the render goes ahead.
+	if _, err := RenderHTTP(&HTTPConfig{
+		Request: testReq, Response: testRes,
+		RedactRe: []*regexp.Regexp{re}, RedactKeep: 4,
+	}); err != nil {
+		t.Errorf("keep 4 = %v, want a render", err)
+	}
+}
+
+// extendDown stands in for a second Render with MinHeight. It is only correct
+// while the two produce the same pixels, so pin that.
+func TestExtendDownMatchesMinHeight(t *testing.T) {
+	cfg := func() *Config {
+		return &Config{
+			Lines: tokenizeFor(t, "GET / HTTP/1.1\nHost: a\n"), Title: "Request",
+			Theme: BurpTheme, Wrap: true, WrapWidth: 80, HTTPMode: true,
+			HighlightLines: highlight.Marks{2: nil},
+		}
+	}
+	base, err := Render(cfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := base.Bounds().Dy() + 137
+	want := cfg()
+	want.MinHeight = h
+	wantImg, err := Render(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := extendDown(base, h)
+	if !got.Bounds().Eq(wantImg.Bounds()) || !bytes.Equal(got.Pix, wantImg.Pix) {
+		t.Fatal("extendDown differs from Render with MinHeight")
+	}
+}
+
+// colourHTTP runs a message through the same two passes RenderHTTP does.
+func colourHTTP(t *testing.T, msg string) []highlight.LineTokens {
+	t.Helper()
+	lines, _, err := tokenizeHTTP(msg, BurpStyle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return burpColourMessage(lines)
+}
+
+// hasToken reports whether line (1-based) holds a token with exactly this text
+// in this colour.
+func hasToken(lines []highlight.LineTokens, line int, text string, c color.NRGBA) bool {
+	if line < 1 || line > len(lines) {
+		return false
+	}
+	for _, tok := range lines[line-1].Tokens {
+		if tok.Text == text && (color.NRGBA{tok.R, tok.G, tok.B, 0xff}) == c {
+			return true
+		}
+	}
+	return false
+}
+
+// chroma's http lexer gives up on the first line it does not know — an HTTP/2
+// pseudo header, a WebDAV verb, a header with an empty value — and everything
+// after it, the body included, comes out as one flat run. The header lines hide
+// that because they are repainted anyway; the body is where the evidence is.
+func TestBodyColouredWhenHTTPLexerRejectsALine(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		line int
+		key  string
+	}{
+		{"http2 post", ":method: POST\n:path: /api/users\n:authority: a.test\ncontent-type: application/json\n\n" +
+			`{"role":"admin","id":7}` + "\n", 6, `"role"`},
+		{"webdav verb", "PROPFIND /dav HTTP/1.1\nHost: a\nContent-Type: application/xml\n\n<a>1</a>\n", 5, "a"},
+		{"empty header value", "POST /x HTTP/1.1\r\nHost: a\r\nX-Empty:\r\nContent-Type: application/json\r\n\r\n" +
+			`{"role":"admin"}`, 6, `"role"`},
+		{"structured suffix", "HTTP/1.1 200 OK\nContent-Type: application/problem+json\n\n" +
+			`{"title":"x"}`, 4, `"title"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := colourHTTP(t, tc.msg)
+			if len(got) != tc.line {
+				t.Fatalf("got %d lines, want %d: the line numbers must match the capture", len(got), tc.line)
+			}
+			if !hasToken(got, tc.line, tc.key, burpNameTag) {
+				t.Errorf("body key %q is not tag-coloured: %+v", tc.key, got[tc.line-1].Tokens)
+			}
+		})
+	}
+}
+
+// curl -i through a proxy prints the proxy's "200 Connection established"
+// block before the real response, and a large upload gets "100 Continue". The
+// real response's headers are still headers, and its body is typed by its own
+// Content-Type, not by the interim block's (which has none).
+func TestInterimStatusBlocks(t *testing.T) {
+	proxy := "HTTP/1.1 200 Connection established\r\n\r\nHTTP/2 200\r\ncontent-type: application/json\r\n" +
+		"set-cookie: sid=XYZ; Path=/; HttpOnly\r\n\r\n" + `{"token":"secret","user":"admin"}` + "\r\n"
+	got := colourHTTP(t, proxy)
+	if len(got) != 7 {
+		t.Fatalf("got %d lines, want 7", len(got))
+	}
+	if toks := got[2].Tokens; len(toks) != 1 || toks[0].R != burpLineColour.R {
+		t.Errorf("final status line = %+v, want one line-coloured run", toks)
+	}
+	if !hasToken(got, 5, "set-cookie:", burpLineColour) || !hasToken(got, 5, "sid", burpParamName) {
+		t.Errorf("final headers painted as body: %+v", got[4].Tokens)
+	}
+	if !hasToken(got, 7, `"token"`, burpNameTag) {
+		t.Errorf("final body is not json-coloured: %+v", got[6].Tokens)
+	}
+
+	// 103 Early Hints carries headers of its own; the final block still wins.
+	cont := "HTTP/1.1 100 Continue\n\nHTTP/1.1 103 Early Hints\nLink: </a.css>; rel=preload\n\n" +
+		"HTTP/1.1 201 Created\nContent-Type: application/x-www-form-urlencoded\n\nid=7&owner=victim\n"
+	got = colourHTTP(t, cont)
+	if len(got) != 9 {
+		t.Fatalf("got %d lines, want 9", len(got))
+	}
+	if !hasToken(got, 4, "Link:", burpLineColour) {
+		t.Errorf("early-hints header not a header: %+v", got[3].Tokens)
+	}
+	if !hasToken(got, 7, "Content-Type:", burpLineColour) {
+		t.Errorf("final header not a header: %+v", got[6].Tokens)
+	}
+	if !hasToken(got, 9, "owner", burpParamName) {
+		t.Errorf("final form body not form-coloured: %+v", got[8].Tokens)
+	}
+
+	// A final response whose body happens to start with a status line is still
+	// body: only the interim shapes open a new header block.
+	echo := "HTTP/1.1 200 OK\nContent-Type: text/plain\n\nHTTP/1.1 200 OK\nX-Inner: 1\n"
+	got = colourHTTP(t, echo)
+	if hasToken(got, 5, "X-Inner:", burpLineColour) {
+		t.Errorf("an echoed response in the body was painted as headers: %+v", got[4].Tokens)
+	}
+}
+
+// The status-line warning is about the status the image shows. After an
+// interim block, that is the final status line, not line 1.
+func TestStatusLineWarningAfterInterimBlock(t *testing.T) {
+	proxy := "HTTP/1.1 200 Connection established\n\nHTTP/2 200\ncontent-type: application/json\n\n{\"a\":1}\n"
+	for _, tc := range []struct {
+		spec string
+		warn bool
+	}{{"3-6", false}, {"4-6", true}, {"1-2,4-6", true}} {
+		spec, err := highlight.ParseLineSpec(tc.spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var warned bool
+		_, err = RenderHTTP(&HTTPConfig{
+			Response: proxy, ResponseLines: spec,
+			Warn: func(m string) { warned = warned || strings.Contains(m, "status line") },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if warned != tc.warn {
+			t.Errorf("--ns %s: status-line warning = %v, want %v", tc.spec, warned, tc.warn)
+		}
+	}
+}
+
+// --context only replaces a panel's line range when that panel has a mark to
+// center on. A panel without marks keeps its --nr/--ns, so warning that the
+// range was ignored would contradict the image.
+func TestContextOverrideWarningIsExact(t *testing.T) {
+	reqSpec, err := highlight.ParseLineSpec("1-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := func(mark string) ([]string, *HTTPFacts) {
+		var warned []string
+		facts := &HTTPFacts{}
+		_, err := RenderHTTP(&HTTPConfig{
+			Request: testReq, Response: testRes,
+			Mark: []string{mark}, Context: 1,
+			RequestLines: reqSpec, ResponseLines: reqSpec,
+			Warn:  func(m string) { warned = append(warned, m) },
+			Facts: facts,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return warned, facts
+	}
+	has := func(ws []string, s string) bool {
+		for _, w := range ws {
+			if strings.Contains(w, s) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// The mark is in the response only: --nr is applied, --ns is overridden.
+	warned, facts := run(`"admin":true`)
+	if has(warned, "overrides --nr") {
+		t.Errorf("warned that --nr was ignored, but the request view is %d-%d: %v",
+			facts.Request.First, facts.Request.Last, warned)
+	}
+	if facts.Request.First != 1 || facts.Request.Last != 2 {
+		t.Errorf("request extent = %d-%d, want --nr's 1-2", facts.Request.First, facts.Request.Last)
+	}
+	if !has(warned, "--context overrides --ns; ignoring it") {
+		t.Errorf("no --ns override warning in %v", warned)
+	}
+
+	// The mark is in the request only: the reverse.
+	warned, _ = run("hunter2")
+	if !has(warned, "--context overrides --nr; ignoring it") || has(warned, "overrides --ns") {
+		t.Errorf("warnings = %v, want only the --nr override", warned)
+	}
+}
+
+// Without a Content-Type the form guess is all there is, so it has to refuse
+// lines that merely contain one '=': markup, script, prose and json. A form
+// field's name is URL-encoded, so it never holds a raw space or markup.
+func TestLooksFormEncoded(t *testing.T) {
+	for line, want := range map[string]bool{
+		"uid=admin&passw=x":             true,
+		"a=1":                           true,
+		"a=&b=":                         true,
+		"q=hello world&x=%3Cy%3E":       true,
+		`<a href="/admin">Admin</a>`:    false,
+		"var isAdmin = true;":           false,
+		"total = 5 items":               false,
+		`{"next":"/x?a=1"}`:             false,
+		"=orphan":                       false,
+		"a=1&":                          false,
+		"":                              false,
+		`<input name="q" value="1">`:    false,
+		"title=<b>x</b>&mode=preview":   true,
+		"just some prose with no equal": false,
+	} {
+		if got := looksFormEncoded(line); got != want {
+			t.Errorf("looksFormEncoded(%q) = %v, want %v", line, got, want)
+		}
+	}
+}
+
+// A capture saved without decoding draws as rows of replacement glyphs, which
+// reads as "the server sent garbage" rather than "the analyst kept the wire
+// bytes". The image stays faithful; the warning says what it shows.
+func TestUnreadableBodyWarns(t *testing.T) {
+	warnings := func(cfg *HTTPConfig) []string {
+		var warned []string
+		cfg.Warn = func(m string) { warned = append(warned, m) }
+		if _, err := RenderHTTP(cfg); err != nil {
+			t.Fatal(err)
+		}
+		return warned
+	}
+	has := func(ws []string, s string) bool {
+		for _, w := range ws {
+			if strings.Contains(w, s) {
+				return true
+			}
+		}
+		return false
+	}
+	gz := "HTTP/1.1 200 OK\nContent-Type: application/json\nContent-Encoding: gzip\n\n\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03\xab\xae\x05\x00\x43\xbf\xa6\xa3\x02\x00\x00\x00"
+	if w := warnings(&HTTPConfig{Request: testReq, Response: gz}); !has(w, "response body is compressed (Content-Encoding: gzip)") {
+		t.Errorf("no gzip warning in %v", w)
+	}
+	// An already-replaced capture (the CLI's input normaliser re-encodes
+	// invalid bytes as U+FFFD) is the same evidence problem.
+	bin := "HTTP/1.1 200 OK\nContent-Type: application/octet-stream\n\nPK\x03\x04\x00\x00��"
+	if w := warnings(&HTTPConfig{Response: bin}); !has(w, "response body is binary") {
+		t.Errorf("no binary warning in %v", w)
+	}
+	reqBin := "POST /up HTTP/1.1\nHost: a\n\n\xff\xfe\x00raw"
+	if w := warnings(&HTTPConfig{Request: reqBin}); !has(w, "request body is binary") {
+		t.Errorf("no request binary warning in %v", w)
+	}
+	// A declared encoding on a header-only response, and a plain text body,
+	// are not warned about.
+	empty := "HTTP/1.1 304 Not Modified\nContent-Encoding: gzip\n\n"
+	if w := warnings(&HTTPConfig{Request: testReq, Response: empty}); has(w, "body is") {
+		t.Errorf("warned about an empty body: %v", w)
+	}
+	if w := warnings(&HTTPConfig{Request: testReq, Response: testRes}); has(w, "body is") {
+		t.Errorf("warned about a text body: %v", w)
+	}
+	// curl -i --compressed, DevTools copies and proxy exports keep the
+	// Content-Encoding header but carry the decoded body. The image shows the
+	// content, so saying it shows compressed bytes would be false.
+	for _, enc := range []string{"gzip", "br", "deflate", "zstd", "gzip, br"} {
+		decoded := "HTTP/2 200\ncontent-type: application/json\ncontent-encoding: " + enc + "\nvary: accept-encoding\n\n" + `{"user":"admin","role":"owner"}`
+		if w := warnings(&HTTPConfig{Request: testReq, Response: decoded}); has(w, "body is") {
+			t.Errorf("warned about a decoded body under Content-Encoding: %s: %v", enc, w)
+		}
+	}
+	// A compressed header over bytes the normaliser already replaced still
+	// gets the compressed message, not the generic binary one.
+	replaced := "HTTP/1.1 200 OK\nContent-Encoding: br\n\n\ufffd\ufffdx"
+	if w := warnings(&HTTPConfig{Request: testReq, Response: replaced}); !has(w, "response body is compressed (Content-Encoding: br)") {
+		t.Errorf("no br warning for replaced bytes in %v", w)
+	}
+}
+
+// Burp enables Render from the declared Content-Type. A JSON API that returns
+// markup inside a string is still JSON, which a browser does not render — and
+// for XSS evidence, the declared type is the point. Only an untyped body is
+// sniffed.
+func TestRenderTabFollowsContentType(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + `{"tpl":"<html><body>hi</body></html>"}`: false,
+		"HTTP/1.1 200 OK\nContent-Type: text/plain\n\n<html><body>hi</body></html>":                      false,
+		"HTTP/1.1 200 OK\nContent-Type: text/html; charset=utf-8\n\n<p>x</p>":                            true,
+		"HTTP/1.1 200 OK\nContent-Type: application/xhtml+xml\n\n<p>x</p>":                               true,
+		"HTTP/1.1 200 OK\n\n<!DOCTYPE html>\n<p>x</p>":                                                   true,
+		"HTTP/1.1 200 OK\nServer: x\n\n<html>":                                                           true,
+		"HTTP/1.1 100 Continue\n\nHTTP/1.1 200 OK\nContent-Type: text/html\n\n<p>x</p>":                  true,
+		"HTTP/1.1 200 OK\nX-Note: <html>\n\n{}":                                                          false,
+	} {
+		tabs := burpTabs("Response", msg)
+		if got := !tabs[len(tabs)-1].disabled; got != want {
+			t.Errorf("Render enabled = %v, want %v for %q", got, want, msg)
+		}
+	}
+}
+
+// Burp paints markup delimiters as plain text and only the names in the tag
+// colour. chroma's XML lexer folds the brackets and the attribute '=' into its
+// tag tokens ("<user", "id=", "</name><email>"), and the HTML lexer leaves
+// "></" and ")</" in the punctuation colour, so the same structure looked
+// different depending on the declared type.
+func TestMarkupDelimitersArePlainText(t *testing.T) {
+	xml := "HTTP/1.1 200 OK\nContent-Type: application/xml\n\n" +
+		`<user id="1"><name>&xxe;</name><email>a@b.test</email></user>` + "\n"
+	got := colourHTTP(t, xml)
+	for _, want := range []struct {
+		text string
+		c    color.NRGBA
+	}{
+		{"<", burpBodyText}, {"user", burpNameTag}, {"id", burpNameTag}, {"=", burpBodyText},
+		{`"1"`, burpString}, {"><", burpBodyText}, {"name", burpNameTag}, {"</", burpBodyText},
+		{"email", burpNameTag}, {">", burpBodyText},
+	} {
+		if !hasToken(got, 4, want.text, want.c) {
+			t.Errorf("xml: no %q in %v: %+v", want.text, want.c, got[3].Tokens)
+		}
+	}
+	var text strings.Builder
+	for _, tok := range got[3].Tokens {
+		text.WriteString(tok.Text)
+	}
+	if !strings.Contains(xml, text.String()+"\n") {
+		t.Errorf("splitting changed the text: %q", text.String())
+	}
+
+	html := "HTTP/1.1 200 OK\nContent-Type: text/html\n\n<p><script>alert(1)</script></p>\n"
+	got = colourHTTP(t, html)
+	if !hasToken(got, 4, "</", burpBodyText) || !hasToken(got, 4, "></", burpBodyText) {
+		t.Errorf("html: closing delimiters keep the punctuation colour: %+v", got[3].Tokens)
+	}
+	if !hasToken(got, 4, "script", burpNameTag) {
+		t.Errorf("html: tag name lost its colour: %+v", got[3].Tokens)
+	}
+
+	// A JSON key that holds markup is a key, not a tag.
+	js := "HTTP/1.1 200 OK\nContent-Type: application/json\n\n" + `{"<b>":"x"}` + "\n"
+	got = colourHTTP(t, js)
+	if !hasToken(got, 4, `"<b>"`, burpNameTag) {
+		t.Errorf("json key with markup was split: %+v", got[3].Tokens)
+	}
+}
+
+// A single pane's render error names the panel, the way a pair's does, so the
+// CLI message says which side was too tall.
+func TestSinglePaneErrorNamesPanel(t *testing.T) {
+	huge := "HTTP/1.1 200 OK\n\n" + strings.Repeat("line\n", 1200)
+	_, err := RenderHTTP(&HTTPConfig{Response: huge})
+	if err == nil || !strings.HasPrefix(err.Error(), "render Response: ") {
+		t.Errorf("err = %v, want it prefixed with the panel name", err)
+	}
+}
+
+// HTTPLineCount is what the CLI clamps --nr/--hr against before rendering, so
+// it has to name the same last line the renderer numbers.
+func TestHTTPLineCountMatchesTheTokenizer(t *testing.T) {
+	for _, msg := range []string{
+		testReq,
+		testRes,
+		"GET / HTTP/1.1\r\nHost: x\r\n\r\n",
+		"GET / HTTP/1.1\nHost: x",
+		"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello\n\n",
+		"HTTP/1.1 200 OK\nContent-Type: text/html\n\n<p>a</p>\n   ",
+		"HTTP/1.1 204 No Content\r\r\r",
+		"HTTP/1.1 200 OK\nContent-Type: application/xml\n\n<a>\n<b/>\n</a>",
+	} {
+		lines, _, err := tokenizeHTTP(msg, BurpStyle)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := HTTPLineCount(msg), lines[len(lines)-1].LineNum; got != want {
+			t.Errorf("HTTPLineCount(%q) = %d, the renderer numbers %d", msg, got, want)
+		}
 	}
 }

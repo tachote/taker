@@ -21,3 +21,13 @@ func TestCanDraw(t *testing.T) {
 		}
 	}
 }
+
+// The renderer asks about every visible rune of a view, so a call has to be
+// cheap and must not allocate.
+func BenchmarkCanDraw(b *testing.B) {
+	text := []rune("func main() { token := \"señor→✓\" } // ☕ 日本 ¿ü‽")
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		CanDraw(text[i%len(text)])
+	}
+}

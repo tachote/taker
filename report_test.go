@@ -3,11 +3,17 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"flag"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // captureStderr swaps the process's stderr for a pipe while fn runs, so a test
@@ -362,6 +368,25 @@ func TestDryRunWritesNothing(t *testing.T) {
 	if _, err := os.Stat(out); !os.IsNotExist(err) {
 		t.Error("dry run wrote the PNG it promised not to")
 	}
+	// "The same document": a preflight that omits the crop cannot be used to
+	// check what the image would show. Compare against a real run's crop.
+	trim := func(dry bool) *Crop {
+		t.Helper()
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Output: out, Lines: "2", DryRun: dry, JSON: true}), r)
+		})
+		if code != exitOK {
+			t.Fatalf("dry=%v run = %d", dry, code)
+		}
+		return rep.Crop
+	}
+	dry, real := trim(true), trim(false)
+	if dry == nil || real == nil {
+		t.Fatalf("crop: dry run %+v, real run %+v; want both present", dry, real)
+	}
+	if dry.First != 2 || dry.Last != 2 || dry.Shown != 1 || !reflect.DeepEqual(dry, real) {
+		t.Errorf("dry-run crop = %+v, real-run crop = %+v; want both lines 2-2 of 2", dry, real)
+	}
 }
 
 // The report carries the same provenance the PNG embeds: input hashes and the
@@ -397,13 +422,7 @@ func TestReportCarriesProvenanceAndRedactions(t *testing.T) {
 	}
 	// The PNG embeds the same data: the image is self-describing when it
 	// travels without the report.
-	png, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(png, []byte("taker:sha256")) {
-		t.Error("PNG does not carry the input hash as a tEXt chunk")
-	}
+	assertPNGAgreesWithReport(t, out, rep)
 }
 
 // `taker exec` runs the command and the report says so — source.kind, the
@@ -606,6 +625,42 @@ func TestHTTPFValidation(t *testing.T) {
 	}
 }
 
+// An HTTP/2 request copied in pseudo-header form has no request line. The
+// renderer draws it, so -r and a request-only -f accept it too; a log file
+// that merely mentions a header is still refused.
+func TestHTTP2PseudoHeaderRequest(t *testing.T) {
+	dir := t.TempDir()
+	h2 := filepath.Join(dir, "h2_req.http")
+	if err := os.WriteFile(h2, []byte(":method: POST\n:path: /api/users\n:authority: a.test\n:scheme: https\ncontent-type: application/json\n\n{\"a\":1}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	res := filepath.Join(dir, "res.http")
+	if err := os.WriteFile(res, []byte("HTTP/2 201\ncontent-type: application/json\n\n{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []HTTPCmd{
+		{Request: h2, Response: res},
+		{Request: h2},
+		{File: h2},
+	} {
+		c.DryRun, c.JSON = true, true
+		code, rep, _ := runJSON(t, func(r *reporter) int { return runHTTP(&c, r) })
+		if code != exitOK || rep.Panels == nil || rep.Panels.Request == nil {
+			t.Errorf("%+v = %d (%v), want the request rendered", c, code, rep.Error)
+		}
+	}
+	logf := filepath.Join(dir, "app.log")
+	if err := os.WriteFile(logf, []byte("2026-01-01 :method: GET seen\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runHTTP(&HTTPCmd{Request: logf, DryRun: true, JSON: true}, r)
+	})
+	if code != exitInput || rep.Error == nil || !strings.Contains(rep.Error.Message, ":method pseudo header") {
+		t.Errorf("log file as -r = %d (%v), want an input error naming both request forms", code, rep.Error)
+	}
+}
+
 // exec's provenance gets the same scrub: a token in --sh that --redact hides
 // must not survive in source.path, the report command, or the taker:exec
 // chunk embedded in the PNG.
@@ -635,5 +690,518 @@ func TestExecScrubsShellSecrets(t *testing.T) {
 	}
 	if bytes.Contains(png, []byte("topsecretvalue")) {
 		t.Error("the taker:exec chunk embeds the redacted literal")
+	}
+}
+
+// The PNG's own taker:sha256 chunk must equal the report's sum. The hash is
+// computed over content that is already masked, so it cannot carry a secret —
+// scrubbing it a second time only destroyed the provenance: a hex --redact-re
+// wiped it, and a short fragment cut a hole in the middle of it.
+func TestPNGHashSurvivesRedaction(t *testing.T) {
+	cases := []struct {
+		name string
+		cmd  SnapCmd
+	}{
+		{"hex pattern", SnapCmd{RedactRe: []string{`[0-9a-f]{32}`}}},
+		{"short fragment", SnapCmd{Redact: []string{"k-e3-9f-a1-0c-d4"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "k.py")
+			src := "api_key = \"9e107d9d372bb6826bd81d3542a419d6\"\nk = \"k-e3-9f-a1-0c-d4\"\n"
+			if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out := filepath.Join(dir, "k.png")
+			cmd := tc.cmd
+			cmd.File, cmd.Output, cmd.JSON = file, out, true
+			code, rep, _ := runJSON(t, func(r *reporter) int { return runSnap(snapCmd(cmd), r) })
+			if code != exitOK || len(rep.SHA256) != 1 {
+				t.Fatalf("run = %d, sha256 = %+v", code, rep.SHA256)
+			}
+			data, err := os.ReadFile(out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := pngTextChunks(t, data)["taker:sha256"]; got != rep.SHA256[0].Sum {
+				t.Errorf("PNG taker:sha256 = %q, report says %q", got, rep.SHA256[0].Sum)
+			}
+		})
+	}
+}
+
+// Fragments shorter than three bytes carry almost no secret entropy and match
+// ordinary code: "sk" from sk-ab12cdef9 used to black out ask, task and skip,
+// and the caption came out as ta<redacted> <redacted>ip. Evidence that hides
+// non-secret code is not faithful, so only the documented len >= 3 rule applies.
+func TestShortFragmentsAreNotSecrets(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.py")
+	src := "def ask(task):\n    token = \"sk-ab12cdef9\"\n    return os.environ[\"skip\"], task\n"
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var caption string
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		c := runSnap(snapCmd(SnapCmd{
+			File: file, Output: filepath.Join(dir, "a.png"), JSON: true,
+			Redact: []string{"sk-ab12cdef9"}, Label: "task skip",
+		}), r)
+		caption = r.scrub("task skip")
+		return c
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	// The needle and its one long component "ab12cdef9" — nothing else.
+	if rep.Redactions != 2 {
+		t.Errorf("redactions = %d, want 2 (needle + ab12cdef9)", rep.Redactions)
+	}
+	if caption != "task skip" {
+		t.Errorf("caption scrubbed to %q, want it intact", caption)
+	}
+}
+
+// bigSource is a few hundred KB of ordinary code holding one token — the
+// size of a vendored or minified file an analyst renders an excerpt of. addInput
+// scrubs the whole input, so the scrub must stay linear in it.
+func bigSource(lines int) string {
+	var b strings.Builder
+	for i := 0; i < lines; i++ {
+		if i == lines/2 {
+			b.WriteString("    token = \"tok_9F3KQ7ZP2M\"  # the one secret\n")
+			continue
+		}
+		b.WriteString("    result = compute_value(alpha, beta, gamma)  # filler\n")
+	}
+	return b.String()
+}
+
+func BenchmarkScrubRegex(b *testing.B) {
+	r := newReporter("", "snap")
+	r.setSecrets([]string{"hunter2-literal"})
+	r.secretRes = []*regexp.Regexp{regexp.MustCompile(`tok_[A-Z0-9]+`)}
+	s := bigSource(5000) // ~270 KB
+	b.SetBytes(int64(len(s)))
+	b.ReportAllocs()
+	for range b.N {
+		r.scrub(s)
+	}
+}
+
+func BenchmarkScrubLiterals(b *testing.B) {
+	r := newReporter("", "snap")
+	r.setSecrets([]string{"tok_9F3KQ7ZP2M", "hunter2-literal", `a"quoted\secret`})
+	s := bigSource(5000)
+	b.SetBytes(int64(len(s)))
+	b.ReportAllocs()
+	for range b.N {
+		r.scrub(s)
+	}
+}
+
+// scrubSuffixRef is the scrub that asked each pattern for a match anchored at
+// every byte of the remaining string — correct for context-free patterns but
+// quadratic. It stays here as the reference the linear scrub must agree with.
+func scrubSuffixRef(r *reporter, s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if strings.HasPrefix(s[i:], "<redacted>") {
+			b.WriteString("<redacted>")
+			i += len("<redacted>")
+			continue
+		}
+		t, best := s[i:], 0
+		for _, sec := range r.secrets {
+			if strings.HasPrefix(t, sec) && len(sec) > best {
+				best = len(sec)
+			}
+			if q := strconv.Quote(sec); strings.HasPrefix(t, q) && len(q) > best {
+				best = len(q)
+			}
+		}
+		for _, re := range r.secretRes {
+			if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 && loc[1] > best {
+				best = loc[1]
+			}
+		}
+		if best > 0 {
+			b.WriteString("<redacted>")
+			i += best
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
+}
+
+// The linear scrub masks what the per-byte scan masked for patterns that do
+// not look at context, including the overlaps where a literal or a marker ends
+// inside a pattern match and the match's tail must still go. Where the two
+// differ, want says what the linear scrub must produce instead, and why.
+func TestScrubMatchesSuffixScan(t *testing.T) {
+	cases := []struct {
+		lits []string
+		res  []string
+		in   string
+		want string
+	}{
+		{[]string{"hunter2"}, []string{`tok_[A-Z0-9]+`}, "a hunter2 b tok_AB12 c \"hunter2\" tok_ d", ""},
+		{nil, []string{`[0-9a-f]{32}`}, "k = 9e107d9d372bb6826bd81d3542a419d6 and 9e107d9d372bb6826bd81d3542a419d6ff", ""},
+		// A literal that is a prefix of a longer pattern match: the tail goes too.
+		{[]string{"tok_AB"}, []string{`tok_[A-Z0-9]+`}, "x tok_AB12CD y", ""},
+		// A literal that starts before a pattern match and ends inside it: the
+		// per-byte scan resumed after the literal, found no "tok_" there and
+		// left the match's tail _ZZ9 readable. The whole match is the secret.
+		{[]string{"xx-tok"}, []string{`tok_[A-Z0-9]+`}, "a xx-tok_ZZ9 b", "a <redacted><redacted> b"},
+		// A pattern that runs into an existing marker keeps masking past it.
+		{nil, []string{`\S+`}, "<redacted>abc def", ""},
+		{[]string{"a"}, []string{`a+`}, "baaab aaa", ""},
+		{nil, []string{`(?s)BEGIN.*?END`}, "pre BEGIN\nkey\nEND post", ""},
+		{[]string{"sekret-token"}, nil, `var k = "sekret-token"` + "\n", ""},
+	}
+	for _, tc := range cases {
+		r := newReporter("", "snap")
+		r.setSecrets(tc.lits)
+		for _, p := range tc.res {
+			r.secretRes = append(r.secretRes, regexp.MustCompile(p))
+		}
+		got, want := r.scrub(tc.in), tc.want
+		if want == "" {
+			want = scrubSuffixRef(r, tc.in)
+		}
+		if got != want {
+			t.Errorf("scrub(%q) lits=%q res=%q\n got %q\nwant %q", tc.in, tc.lits, tc.res, got, want)
+		}
+		if again := r.scrub(got); again != got {
+			t.Errorf("scrub is not idempotent: %q -> %q", got, again)
+		}
+	}
+}
+
+// A pattern now sees its real context, the same per-line context the image
+// matches it in: ^ is a line start, not wherever the scan happens to be. The
+// per-byte scan treated every position as a start of text, so it masked
+// mid-line text the image left visible — and both must agree on what is a
+// secret, or the input hash and the image tell different stories.
+func TestScrubPatternContextMatchesTheImage(t *testing.T) {
+	r := newReporter("", "snap")
+	r.secretRes = []*regexp.Regexp{regexp.MustCompile(`^Authorization: \S+`)}
+	in := "GET / HTTP/1.1\nAuthorization: Bearer-abc\nX-Note: see Authorization: x\n"
+	want := "GET / HTTP/1.1\n<redacted>\nX-Note: see Authorization: x\n"
+	if got := r.scrub(in); got != want {
+		t.Errorf("scrub = %q, want %q", got, want)
+	}
+}
+
+// The scrub runs over every input in full, so it must stay linear: the
+// per-byte scan took ~10 s on this input.
+func TestScrubIsLinear(t *testing.T) {
+	r := newReporter("", "snap")
+	r.secretRes = []*regexp.Regexp{regexp.MustCompile(`tok_[A-Z0-9]+`)}
+	s := bigSource(5000)
+	start := time.Now()
+	got := r.scrub(s)
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("scrub of %d bytes took %v", len(s), d)
+	}
+	if strings.Contains(got, "tok_9F3KQ7ZP2M") || strings.Count(got, "<redacted>") != 1 {
+		t.Error("the one token was not masked exactly once")
+	}
+}
+
+// The JSON report prints <, > and & as themselves: the README promises values
+// "replaced by <redacted>", and a consumer grepping for that marker — or for
+// the && of the shell line it ran — found \u003credacted\u003e instead.
+func TestJSONReportDoesNotEscapeHTML(t *testing.T) {
+	rep := newReporter("json", "exec")
+	var out bytes.Buffer
+	rep.out = &out
+	rep.rep.Command = `taker exec --sh cat a.sh && echo "<ok>" --redact hunter2`
+	rep.setSecrets([]string{"hunter2"})
+	rep.rep.OK = true
+	rep.emit(exitOK)
+	got := out.String()
+	for _, want := range []string{"<redacted>", `&& echo \"<ok>\"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("json report lacks the literal %q:\n%s", want, got)
+		}
+	}
+	if !strings.HasSuffix(got, "}\n") || strings.HasSuffix(got, "\n\n") {
+		t.Errorf("json report should end in exactly one newline: %q", got[max(0, len(got)-8):])
+	}
+	var back Report
+	if err := json.Unmarshal(out.Bytes(), &back); err != nil || back.Command != rep.rep.Command {
+		t.Errorf("unescaped report does not decode back: %v %q", err, back.Command)
+	}
+}
+
+// A detached PNG has to prove its version by machine, not only in footnote
+// pixels: the revision and the source path travel as metadata next to the
+// hash, and they say what the report says.
+func TestPNGCarriesSourceAndRevision(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	dir := t.TempDir()
+	git := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@example.com",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	git("init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "auth.py"), []byte("def login():\n    return 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-qm", "add auth")
+
+	out := filepath.Join(dir, "g.png")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{Git: "HEAD:auth.py", RepoDir: dir, Output: out, JSON: true}), r)
+	})
+	if code != exitOK || rep.Source == nil || rep.Source.Rev == "" {
+		t.Fatalf("run = %d, source = %+v", code, rep.Source)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := pngTextChunks(t, data)
+	if meta["taker:git-revision"] != rep.Source.Rev {
+		t.Errorf("taker:git-revision = %q, report rev = %q", meta["taker:git-revision"], rep.Source.Rev)
+	}
+	if meta["taker:source"] != "git:auth.py" {
+		t.Errorf("taker:source = %q, want git:auth.py", meta["taker:source"])
+	}
+
+	// A file input names its path; a redacted needle in it stays masked in
+	// the metadata exactly as it is in the report.
+	file := filepath.Join(dir, "hunter2-dump.py")
+	if err := os.WriteFile(file, []byte("x = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = filepath.Join(dir, "f.png")
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: file, Output: out, Redact: []string{"hunter2"}, JSON: true}), r)
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	if data, err = os.ReadFile(out); err != nil {
+		t.Fatal(err)
+	}
+	meta = pngTextChunks(t, data)
+	if got := meta["taker:source"]; got != "file:"+rep.Source.Path || strings.Contains(got, "hunter2") {
+		t.Errorf("taker:source = %q, report path = %q", got, rep.Source.Path)
+	}
+	if _, ok := meta["taker:git-revision"]; ok {
+		t.Error("a plain file claims a git revision")
+	}
+}
+
+// assertPNGAgreesWithReport checks the contract between the two channels:
+// every taker:sha256[:name] chunk in the image equals the report's entry for
+// that input, and the image carries no hash the report does not. A test that
+// only looked for the bytes "taker:sha256" let a wiped sum pass.
+func assertPNGAgreesWithReport(t *testing.T, pngPath string, rep Report) {
+	t.Helper()
+	data, err := os.ReadFile(pngPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := pngTextChunks(t, data)
+	want := map[string]string{}
+	for _, h := range rep.SHA256 {
+		key := "taker:sha256"
+		if h.Name != "source" {
+			key += ":" + h.Name
+		}
+		want[key] = h.Sum
+	}
+	if len(want) == 0 {
+		t.Fatal("the report carries no input hash")
+	}
+	for key, sum := range want {
+		if meta[key] != sum {
+			t.Errorf("PNG %s = %q, report says %q", key, meta[key], sum)
+		}
+	}
+	for key := range meta {
+		if strings.HasPrefix(key, "taker:sha256") && want[key] == "" {
+			t.Errorf("PNG carries %s, which the report does not", key)
+		}
+	}
+	if meta["taker:version"] != rep.Version || meta["taker:generated"] != rep.Generated {
+		t.Errorf("PNG version/generated = %q/%q, report %q/%q",
+			meta["taker:version"], meta["taker:generated"], rep.Version, rep.Generated)
+	}
+}
+
+// The PNG and the report agree in every mode, with and without a pattern
+// that matches hex — the shape every hash has.
+func TestPNGAndReportAgreeInEveryMode(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	code := write("k.py", "api_key = \"9e107d9d372bb6826bd81d3542a419d6\"\n")
+	req := write("req.http", "GET /x HTTP/1.1\nHost: a\nX-Key: 9e107d9d372bb6826bd81d3542a419d6\n\n")
+	res := write("res.http", "HTTP/1.1 200 OK\n\n{\"ok\":true}\n")
+
+	for _, re := range [][]string{nil, {`[0-9a-f]{32}`, `[0-9a-f]{8,}`}} {
+		name := "plain"
+		if re != nil {
+			name = "redact-re"
+		}
+		runs := map[string]func(r *reporter, out string) int{
+			"snap": func(r *reporter, out string) int {
+				return runSnap(snapCmd(SnapCmd{File: code, Output: out, RedactRe: re, JSON: true}), r)
+			},
+			"http": func(r *reporter, out string) int {
+				return runHTTP(&HTTPCmd{Request: req, Response: res, Output: out, RedactRe: re, JSON: true}, r)
+			},
+			"exec": func(r *reporter, out string) int {
+				return runExec(&ExecCmd{
+					Args: []string{"echo", "9e107d9d372bb6826bd81d3542a419d6"}, Output: out, Timeout: 5,
+					RedactRe: re, Theme: "vscode-dark", Chrome: "window", WrapWidth: 80, JSON: true,
+				}, r)
+			},
+		}
+		for mode, run := range runs {
+			t.Run(mode+"/"+name, func(t *testing.T) {
+				out := filepath.Join(dir, mode+"-"+name+".png")
+				code, rep, _ := runJSON(t, func(r *reporter) int { return run(r, out) })
+				if code != exitOK {
+					t.Fatalf("run = %d, error %+v", code, rep.Error)
+				}
+				assertPNGAgreesWithReport(t, out, rep)
+			})
+		}
+	}
+}
+
+var updateGolden = flag.Bool("update", false, "rewrite testdata/report.golden.* from the current output")
+
+// The report's field order is a contract (toon.go says so): a consumer that
+// reads TOON tables or diffs JSON depends on it, and the README drifted from
+// it once already. This pins one realistic run byte for byte in both
+// encodings. Values that legitimately vary — the temp dir, the PNG's size and
+// dimensions, which follow the renderer — are normalized out; run
+// `go test -run TestReportGolden -update` after a deliberate schema change.
+func TestReportGolden(t *testing.T) {
+	dir := t.TempDir()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(wd)
+	// The report's output path is absolute, joined onto the working directory
+	// as the OS reports it (/private/var for /var on macOS) — normalize that.
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := "def login(user):\n    key = \"sekret-token\"\n    return db.query(user)\n"
+	if err := os.WriteFile("auth.py", []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	volatile := regexp.MustCompile(`(?m)("?(?:bytes|width|height)"?: )\d+`)
+
+	for _, format := range []string{"json", "toon"} {
+		os.Remove("out.png") // each run writes fresh, without an overwrite warning
+		rep := newReporter(format, "snap")
+		var out bytes.Buffer
+		rep.out = &out
+		rep.rep.Version = "golden"
+		rep.rep.Generated = "2026-01-01T00:00:00Z"
+		rep.rep.Command = "taker snap auth.py -o out.png -m db.query -m nowhere --redact sekret-token --" + format
+		captureStderr(t, func() {
+			runSnap(snapCmd(SnapCmd{
+				File: "auth.py", Output: "out.png", Context: 1,
+				Mark: []string{"db.query", "nowhere"}, Redact: []string{"sekret-token"},
+			}), rep)
+		})
+		got := strings.ReplaceAll(out.String(), root, "$DIR")
+		got = volatile.ReplaceAllString(got, "${1}0")
+
+		golden := filepath.Join(wd, "testdata", "report.golden."+format)
+		if *updateGolden {
+			if err := os.WriteFile(golden, []byte(got), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		want, err := os.ReadFile(golden)
+		if err != nil {
+			t.Fatalf("%v (run with -update to create it)", err)
+		}
+		if got != string(want) {
+			t.Errorf("%s report drifted from %s:\n--- got\n%s\n--- want\n%s", format, golden, got, want)
+		}
+	}
+}
+
+// kept counts the whole input; shown counts what the image boxes. A trim that
+// leaves the only match outside the view used to report kept=1 on an image
+// with no mark at all.
+func TestMarkShownCountsOnlyTheView(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.py")
+	if err := os.WriteFile(file, []byte("import os\nx = 1\ny = 2\nimport re\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		lines string
+		shown int
+	}{{"2-3", 0}, {"3-4", 1}, {"", 2}} {
+		_, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: file, Lines: tc.lines, Mark: []string{"import"}, DryRun: true, JSON: true}), r)
+		})
+		if len(rep.Marks) != 1 || rep.Marks[0].Kept != 2 || rep.Marks[0].Shown != tc.shown {
+			t.Errorf("--lines %q: marks = %+v, want kept 2, shown %d", tc.lines, rep.Marks, tc.shown)
+		}
+	}
+
+	// http: each panel is trimmed on its own, and a lone response is the
+	// renderer's message 0.
+	req := filepath.Join(dir, "r.http")
+	res := filepath.Join(dir, "s.http")
+	if err := os.WriteFile(req, []byte("GET /a HTTP/1.1\r\nHost: x.test\r\nX-A: import\r\n\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(res, []byte("HTTP/1.1 200 OK\r\nX: import\r\n\r\nimport\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		cmd   HTTPCmd
+		kept  int
+		shown int
+	}{
+		{HTTPCmd{Request: req, Response: res, ReqLines: "1-2"}, 3, 2},
+		{HTTPCmd{Request: req, Response: res}, 3, 3},
+		{HTTPCmd{Response: res, ResLines: "1"}, 2, 0},
+	} {
+		c := tc.cmd
+		c.Mark, c.DryRun, c.JSON = []string{"import"}, true, true
+		_, rep, _ := runJSON(t, func(r *reporter) int { return runHTTP(&c, r) })
+		if len(rep.Marks) != 1 || rep.Marks[0].Kept != tc.kept || rep.Marks[0].Shown != tc.shown {
+			t.Errorf("%+v: marks = %+v, want kept %d, shown %d", tc.cmd, rep.Marks, tc.kept, tc.shown)
+		}
 	}
 }

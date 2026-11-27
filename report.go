@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"image"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -114,15 +116,19 @@ type Panels struct {
 	Response *Crop `json:"response,omitempty"`
 }
 
-// MarkReport is one --mark literal's outcome. Kept and Dropped are what the
-// image shows versus what a limit left out, so a caller can tell a mark that
-// landed where it wanted from one that only half landed.
+// MarkReport is one --mark literal's outcome, counted over the whole input.
+// Kept and Dropped split the matches by --max-marks: the ones it kept versus
+// the ones it left out. Shown is how many kept matches sit on a line the image
+// shows — a --lines or --context trim can leave a kept match out of the view,
+// and kept=1 with no box in the image is the claim a consumer must not trust.
+// It comes last so a TOON table's existing columns keep their positions.
 type MarkReport struct {
 	Needle  string `json:"needle"`
 	Matches int    `json:"matches"`
 	Lines   int    `json:"lines"`
 	Kept    int    `json:"kept"`
 	Dropped int    `json:"dropped"`
+	Shown   int    `json:"shown"`
 }
 
 // ExecReport records the child command's outcome for `taker exec` — the
@@ -131,6 +137,10 @@ type MarkReport struct {
 type ExecReport struct {
 	Exit     *int `json:"exit"`
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Signal names the signal that ended the command (SIGKILL, SIGSEGV),
+	// where exit is null: a signal is not an exit code, and the -1 Go
+	// reports for it read like one.
+	Signal string `json:"signal,omitempty"`
 }
 
 // ThemeReport is one palette, for --list-themes --json.
@@ -156,7 +166,7 @@ type reporter struct {
 	out    io.Writer // stdout: the report, the theme list, nothing else
 	format string    // "", "json" or "toon"
 	rep    Report
-	metaKV [][2]string // PNG tEXt chunks beyond the always-present set
+	metaKV [][2]string // PNG text chunks beyond the always-present set
 	// secrets are the --redact literals of this run: the image hides them,
 	// so every string that leaves the process — warnings, help, errors,
 	// provenance — hides them too. Set as early as the flags are known.
@@ -166,9 +176,14 @@ type reporter struct {
 	// name — a token caught by the regex in a filename only stays hidden if
 	// the pattern itself scrubs the strings it touches.
 	secretRes []*regexp.Regexp
+	// argv is the raw command line, when main knows it. Command is rebuilt
+	// from it on every scrub — each word masked before it is quoted — so a
+	// secret that holds a quote cannot hide from the scrub behind the quoting.
+	argv []string
 	// fragOnly holds the needles' separator-split components — for the pixel
 	// redaction, so a needle spliced by quotes or escapes leaves no readable
-	// fragment behind.
+	// fragment behind. The image masks them only as whole tokens (see
+	// redactFragRes).
 	fragOnly []string
 }
 
@@ -231,7 +246,7 @@ func (r *reporter) setSecretsAll(secrets, literals []string) {
 		for _, part := range strings.FieldsFunc(sec, func(r rune) bool {
 			return strings.ContainsRune("-:=,/.; \t", r)
 		}) {
-			if len(part) >= 2 && part != sec {
+			if len(part) >= 3 && part != sec {
 				add(part)
 				frags = append(frags, part)
 			}
@@ -270,6 +285,7 @@ func (r *reporter) scrub(s string) string {
 	if len(r.secrets) == 0 && len(r.secretRes) == 0 {
 		return s
 	}
+	m := r.matcherFor(s)
 	var b strings.Builder
 	b.Grow(len(s))
 	for i := 0; i < len(s); {
@@ -282,7 +298,7 @@ func (r *reporter) scrub(s string) string {
 			i += len("<redacted>")
 			continue
 		}
-		if n := r.matchLen(s[i:]); n > 0 {
+		if n := m.matchLen(s, i); n > 0 {
 			b.WriteString("<redacted>")
 			i += n
 			continue
@@ -293,26 +309,76 @@ func (r *reporter) scrub(s string) string {
 	return b.String()
 }
 
-// matchLen returns how many leading bytes of t one needle covers — the
-// longest literal, its %q-quoted twin, or a pattern anchored at position 0.
-// Zero-width pattern matches return 0, so a degenerate regex can't consume.
-func (r *reporter) matchLen(t string) int {
-	best := 0
+// scrubMatcher is what one scrub call knows about its input, computed once
+// up front. Asking each pattern for a match anchored at every byte rescanned
+// the whole remaining string per byte — quadratic, 10 s for a 270 KB file
+// with one --redact-re — and quoting every literal per byte cost almost as
+// much again in allocations.
+type scrubMatcher struct {
+	lits  []string // the literals and their %q-quoted twins
+	spans [][2]int // every non-empty pattern match in the input, by start
+	next  int      // first span whose start the scan has not reached
+	reach int      // furthest end of any span starting at or before the scan
+}
+
+// matcherFor finds the pattern matches on the whole input instead of on a
+// suffix, so a pattern keeps its real context: \b and ^ see the byte before
+// the match, which a suffix hid. Matches are also taken line by line — the
+// image matches each line on its own, so ^ and $ there mean line start and
+// end, and a secret the image masks has to be masked here too, or the input
+// hash would cover it in clear.
+func (r *reporter) matcherFor(s string) *scrubMatcher {
+	m := &scrubMatcher{}
 	for _, sec := range r.secrets {
-		if sec == "" {
-			continue
+		if sec != "" {
+			m.lits = append(m.lits, sec, strconv.Quote(sec))
 		}
-		if strings.HasPrefix(t, sec) && len(sec) > best {
-			best = len(sec)
-		}
-		if q := strconv.Quote(sec); strings.HasPrefix(t, q) && len(q) > best {
-			best = len(q)
+	}
+	add := func(re *regexp.Regexp, text string, off int) {
+		for _, loc := range re.FindAllStringIndex(text, -1) {
+			// A zero-width match covers nothing, so a degenerate regex
+			// cannot consume text.
+			if loc[1] > loc[0] {
+				m.spans = append(m.spans, [2]int{off + loc[0], off + loc[1]})
+			}
 		}
 	}
 	for _, re := range r.secretRes {
-		if loc := re.FindStringIndex(t); loc != nil && loc[0] == 0 && loc[1] > best {
-			best = loc[1]
+		add(re, s, 0)
+		if !strings.Contains(s, "\n") {
+			continue
 		}
+		for off := 0; off < len(s); {
+			n := strings.IndexByte(s[off:], '\n')
+			if n < 0 {
+				n = len(s) - off
+			}
+			add(re, s[off:off+n], off)
+			off += n + 1
+		}
+	}
+	slices.SortFunc(m.spans, func(a, b [2]int) int { return a[0] - b[0] })
+	return m
+}
+
+// matchLen returns how many bytes from s[i] one needle covers — the longest
+// literal, its %q-quoted twin, or the rest of any pattern match that covers
+// position i. Covering, not only starting at i: a literal or a marker can end
+// in the middle of a pattern match, and the match's tail is still part of the
+// secret. Calls must come with i non-decreasing, as scrub's scan makes them.
+func (m *scrubMatcher) matchLen(s string, i int) int {
+	best := 0
+	for _, lit := range m.lits {
+		if len(lit) > best && strings.HasPrefix(s[i:], lit) {
+			best = len(lit)
+		}
+	}
+	for m.next < len(m.spans) && m.spans[m.next][0] <= i {
+		m.reach = max(m.reach, m.spans[m.next][1])
+		m.next++
+	}
+	if m.reach-i > best {
+		best = m.reach - i
 	}
 	return best
 }
@@ -324,19 +390,23 @@ func (r *reporter) matchLen(t string) int {
 // Warnings and help are scrubbed at format time, so they never carry the
 // literal regardless of ordering.
 func (r *reporter) scrubSecrets() {
-	// ANSI escapes inside a recorded command split a needle the same way they
-	// do inside a file — normalize before masking or `mR9!^[[31mkXv2` keeps
-	// both halves readable in the PNG's own tEXt chunk.
-	deansi := func(s string) string {
-		b, _ := stripANSI([]byte(s))
-		return string(b)
+	if r.argv != nil {
+		r.rep.Command = r.commandLine()
+	} else {
+		r.rep.Command = r.scrubMeta(r.rep.Command)
 	}
-	r.rep.Command = scrubRedactArgs(r.scrub(deansi(r.rep.Command)))
 	if r.rep.Source != nil {
 		r.rep.Source.Path = r.scrub(r.rep.Source.Path)
 	}
 	for i, kv := range r.metaKV {
-		r.metaKV[i][1] = scrubRedactArgs(r.scrub(deansi(kv[1])))
+		// The input hashes are computed over content addInput already masked,
+		// so they cannot carry a secret. Scrubbing them again only destroys
+		// provenance: a hex --redact-re wipes the sum, a short fragment cuts
+		// a hole in it, and the PNG stops agreeing with the report.
+		if strings.HasPrefix(kv[0], "taker:sha256") {
+			continue
+		}
+		r.metaKV[i][1] = r.scrubMeta(kv[1])
 	}
 	for i, w := range r.rep.Warnings {
 		r.rep.Warnings[i] = r.scrub(w)
@@ -345,6 +415,122 @@ func (r *reporter) scrubSecrets() {
 		r.rep.Marks[i].Needle = r.scrub(m.Needle)
 	}
 	r.rep.Output = r.scrub(r.rep.Output)
+}
+
+// scrubMeta masks one provenance value. ANSI escapes inside a recorded
+// command split a needle the same way they do inside a file — normalize
+// before masking or `mR9!^[[31mkXv2` keeps both halves readable in the PNG's
+// own text chunk.
+func (r *reporter) scrubMeta(v string) string {
+	b, _ := stripANSI([]byte(v))
+	return scrubRedactArgs(r.scrub(string(b)))
+}
+
+// commandLine is the recorded invocation: the program's base name, then each
+// argument masked and shell-quoted. Words joined with bare spaces lost their
+// quoting — `-L "two words"` came back as two arguments — and the record must
+// replay what ran. The base name, not argv[0] as typed: an absolute path to
+// the binary leaks the analyst's filesystem into every image, the same leak
+// the snap title already trims, and it says nothing about what ran.
+func (r *reporter) commandLine() string {
+	if len(r.argv) == 0 {
+		return ""
+	}
+	argv := slices.Clone(r.argv)
+	argv[0] = filepath.Base(argv[0])
+	return r.quoteScrubbed(argv)
+}
+
+// quoteScrubbed masks each word, then quotes it, then masks the line. Word
+// first: quoting escapes a ' or a $, which splits a needle that holds one,
+// and the line-level scrub would no longer see it. The line pass still
+// catches a needle that spans two words.
+func (r *reporter) quoteScrubbed(args []string) string {
+	words := make([]string, len(args))
+	for i, a := range args {
+		b, _ := stripANSI([]byte(a))
+		words[i] = r.scrub(string(b))
+	}
+	for i, w := range words {
+		words[i] = quoteWord(w, true)
+	}
+	return r.scrubMeta(strings.Join(words, " "))
+}
+
+// shellQuote joins argv into one POSIX shell line that splits back into the
+// same words.
+func shellQuote(args []string) string {
+	words := make([]string, len(args))
+	for i, a := range args {
+		words[i] = quoteWord(a, false)
+	}
+	return strings.Join(words, " ")
+}
+
+// quoteWord quotes one word only when it needs it, so a plain command still
+// reads as typed. A word with no ' goes in single quotes, where nothing is
+// special. A word with a ' goes in double quotes, escaping only " $ ` and \:
+// closing the quote around an escaped ' splits a needle such as it's-s3cret
+// in the prompt line, and the image could no longer find it to black it out.
+// A ! forces that form after all, because an interactive bash expands !
+// inside double quotes. With masked set, the <redacted> marker counts as
+// plain: a masked word replays nothing either way, and quoting the marker
+// only adds noise.
+func quoteWord(s string, masked bool) string {
+	if s == "" {
+		return "''"
+	}
+	plain := s
+	if masked {
+		plain = strings.ReplaceAll(s, "<redacted>", "")
+	}
+	if !strings.ContainsFunc(plain, needsQuote) {
+		return s
+	}
+	switch {
+	case !strings.Contains(s, "'"):
+		return "'" + s + "'"
+	case !strings.Contains(s, "!"):
+		var b strings.Builder
+		b.WriteByte('"')
+		for _, c := range s {
+			if strings.ContainsRune("\"$`\\", c) {
+				b.WriteByte('\\')
+			}
+			b.WriteRune(c)
+		}
+		b.WriteByte('"')
+		return b.String()
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// needsQuote is any character outside the set a POSIX shell reads literally
+// in a bare word.
+func needsQuote(c rune) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return false
+	}
+	return !strings.ContainsRune("_@%+=:,./-", c)
+}
+
+// pngMeta is the metadata the PNG carries beyond version, time and command:
+// the input hashes, and where the input came from — the same source path and
+// revision the report states. Without them a detached image proves its
+// version only in footnote pixels, which no tool can check. An exec run is
+// left out of taker:source: taker:exec already names its command line.
+func (r *reporter) pngMeta() [][2]string {
+	meta := slices.Clone(r.metaKV)
+	if src := r.rep.Source; src != nil {
+		if src.Path != "" && src.Kind != "exec" {
+			meta = append(meta, [2]string{"taker:source", r.scrubMeta(src.Kind + ":" + src.Path)})
+		}
+		if src.Rev != "" {
+			meta = append(meta, [2]string{"taker:git-revision", src.Rev})
+		}
+	}
+	return meta
 }
 
 // helpf records the command that fixes or completes the current situation.
@@ -438,19 +624,25 @@ func (r *reporter) emit(code int) int {
 	r.scrubSecrets()
 	switch {
 	case r.format == "json":
-		buf, err := json.MarshalIndent(r.rep, "", "  ")
-		if err != nil {
+		// No HTML escaping: this is not going into a web page, and the
+		// escaped form turns every <redacted> marker and every && of a shell
+		// line into \u003c… noise a consumer greps past.
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
+		enc.SetEscapeHTML(false)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(r.rep); err != nil {
 			r.note("could not encode the json report: %v", err)
 			return code
 		}
-		fmt.Fprintln(r.out, string(buf))
+		r.out.Write(buf.Bytes()) // Encode already ended it with a newline
 	case r.format == "toon" || !r.rep.OK:
 		text, err := r.reportTOON()
 		if err != nil {
 			r.note("could not encode the toon report: %v", err)
 			return code
 		}
-		fmt.Fprintln(r.out, text)
+		fmt.Fprint(r.out, text) // every TOON line already ends in a newline
 	}
 	return code
 }
@@ -484,6 +676,17 @@ func recordMarks(rep *reporter, stats []highlight.MarkStats) {
 	}
 }
 
+// markShown fills marks[].shown once the view is known. recordMarks runs
+// before the trim — --context centers on its matches — so the entries it
+// appended from base on get their shown counts here, in the same order.
+func markShown(rep *reporter, base int, stats []highlight.MarkStats, shown func(i int, st highlight.MarkStats) int) {
+	for i, st := range stats {
+		if base+i < len(rep.rep.Marks) {
+			rep.rep.Marks[base+i].Shown = shown(i, st)
+		}
+	}
+}
+
 // cropOf turns a view's extent into the report's shape. A total of zero means
 // the input was an excerpt, and the field goes out as null rather than as a
 // number nobody measured.
@@ -495,12 +698,44 @@ func cropOf(ext highlight.ViewExtent, total int) Crop {
 	return c
 }
 
-// redactFrags returns the pixel-mask fragments — but only when keep is off:
+// redactFragRes returns the pixel-mask fragments as patterns that match a
+// fragment only where it stands as a whole token — but only when keep is off:
 // --redact-keep shows a span's leading chars, and a kept fragment would show
 // its own. Keep mode is already a weakened guarantee the user asked for.
-func (r *reporter) redactFrags(keep int) []string {
-	if keep > 0 {
+//
+// Whole tokens, because the echo a fragment exists for is bounded by
+// punctuation (strconv reports parsing "ZX9"), while the same letters inside
+// a longer word are ordinary text: "app" from app.example.test blacked out
+// the middle of every "application/json", and evidence that hides what is not
+// secret is not faithful. A fragment glued to other letters by the target
+// ("xZX9y") stays visible; that is the trade this rule makes.
+func (r *reporter) redactFragRes(keep int) []*regexp.Regexp {
+	if keep > 0 || len(r.fragOnly) == 0 {
 		return nil
 	}
-	return r.fragOnly
+	out := make([]*regexp.Regexp, 0, len(r.fragOnly))
+	for _, f := range r.fragOnly {
+		out = append(out, tokenRe(f))
+	}
+	return out
+}
+
+// tokenRe matches s where no word character touches it. The boundary is put
+// only on an edge that is itself an ASCII word character: \b next to "!" or
+// "ñ" would demand a word character outside, and a fragment that starts with
+// punctuation would never match at all. An edge left unbounded only masks
+// more.
+func tokenRe(s string) *regexp.Regexp {
+	pat := regexp.QuoteMeta(s)
+	if isWordByte(s[0]) {
+		pat = `\b` + pat
+	}
+	if isWordByte(s[len(s)-1]) {
+		pat += `\b`
+	}
+	return regexp.MustCompile(pat)
+}
+
+func isWordByte(b byte) bool {
+	return b == '_' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
 }

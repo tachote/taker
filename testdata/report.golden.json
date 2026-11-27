@@ -1,0 +1,51 @@
+{
+  "tool": "taker",
+  "version": "golden",
+  "mode": "snap",
+  "ok": true,
+  "exit": 0,
+  "output": "$DIR/out.png",
+  "bytes": 0,
+  "width": 0,
+  "height": 0,
+  "command": "taker snap auth.py -o out.png -m db.query -m nowhere --redact <redacted> --json",
+  "generated": "2026-01-01T00:00:00Z",
+  "source": {
+    "kind": "file",
+    "path": "auth.py"
+  },
+  "crop": {
+    "first": 2,
+    "last": 3,
+    "shown": 2,
+    "total": 3
+  },
+  "sha256": [
+    {
+      "name": "source",
+      "sum": "0f8a5059d7644ac9e04ace0126e30d668b32a67f5aead4ce8a2f401d1d01a956"
+    }
+  ],
+  "redactions": 3,
+  "marks": [
+    {
+      "needle": "db.query",
+      "matches": 1,
+      "lines": 1,
+      "kept": 1,
+      "dropped": 0,
+      "shown": 1
+    },
+    {
+      "needle": "nowhere",
+      "matches": 0,
+      "lines": 0,
+      "kept": 0,
+      "dropped": 0,
+      "shown": 0
+    }
+  ],
+  "warnings": [
+    "--mark \"nowhere\" matched nothing"
+  ]
+}

@@ -13,10 +13,18 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
           cache: true
+
+      # go.mod's toolchain line is the Go the release ships with. Fail here,
+      # not at release time, when the runner's Go is not that one.
+      - name: Check the Go toolchain
+        run: |
+          want="$(go mod edit -json | jq -r '.Toolchain // empty')"
+          have="$(go env GOVERSION)"
+          test -z "$want" || test "$want" = "$have" || { echo "go is $have, go.mod pins $want"; exit 1; }
 
       - name: Check formatting
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
@@ -27,8 +35,40 @@ jobs:
       - name: Test
         run: go test ./...
 
+      # Pinned so a new staticcheck release cannot turn CI red on its own.
+      # GOTOOLCHAIN=auto lets the go command fetch a newer Go if a future
+      # pin needs one for the build only; the analysis still runs under the
+      # go.mod toolchain set up above.
+      - name: Staticcheck
+        run: |
+          GOTOOLCHAIN=auto go install honnef.co/go/tools/cmd/staticcheck@v0.8.2
+          "$(go env GOPATH)/bin/staticcheck" ./...
+
       # The release ships windows/amd64, so keep it compiling.
       - name: Cross-compile
         run: |
           GOOS=windows GOARCH=amd64 go build -o /dev/null .
           GOOS=darwin GOARCH=arm64 go build -o /dev/null .
+
+  # Separate job so a new advisory reads as its own failure, not as a broken
+  # build. It scans under the go.mod toolchain, the same one the release
+  # workflow builds with, so standard-library advisories match the binaries
+  # users download.
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Same toolchain handling as staticcheck: a newer Go only if the tool
+      # needs one to build, go.mod's Go for the scan.
+      - name: Govulncheck
+        run: |
+          GOTOOLCHAIN=auto go install golang.org/x/vuln/cmd/govulncheck@v1.10.0
+          "$(go env GOPATH)/bin/govulncheck" ./...

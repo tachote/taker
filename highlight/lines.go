@@ -2,6 +2,7 @@ package highlight
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -9,10 +10,31 @@ import (
 
 const GapSentinel = -1
 
+// MaxRangeLines is the widest single range a line spec may name. A view
+// cannot show more than a few hundred lines (the image height limit), and every
+// range is expanded to one entry per line, so "1-300000000" — a typo — used
+// gigabytes of memory or hung before anything could refuse it. Callers that
+// know the file length clamp to it first; this is the backstop for those that
+// do not.
+const MaxRangeLines = 1_000_000
+
 // ParseLineSpec parses a line spec string like "1,21,39,45-51,53-67"
 // into a sorted slice of concrete line numbers with -1 gap sentinels inserted
 // between non-adjacent ranges.
 func ParseLineSpec(s string) ([]int, error) {
+	return ParseLineSpecMax(s, 0)
+}
+
+// ParseLineSpecMax is ParseLineSpec for a source whose last line is maxLine
+// (0 = unknown). Ranges are clamped to the file before they are expanded: a
+// line past the end is dropped by FilterLines anyway, so naming it costs
+// memory and changes nothing drawn.
+//
+// A range that starts past the end keeps its first line rather than
+// vanishing: an empty spec means "every line", and "--lines 500-600" on a
+// 3-line file has to keep failing as "no lines matched" instead of quietly
+// rendering the whole file.
+func ParseLineSpecMax(s string, maxLine int) ([]int, error) {
 	if s == "" {
 		return nil, nil
 	}
@@ -20,51 +42,67 @@ func ParseLineSpec(s string) ([]int, error) {
 	var nums []int
 	for _, seg := range strings.Split(s, ",") {
 		seg = strings.TrimSpace(seg)
-		if strings.Contains(seg, "-") {
-			parts := strings.SplitN(seg, "-", 2)
-			lo, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-			if err != nil {
-				return nil, fmt.Errorf("invalid range %q: %w", seg, err)
-			}
-			hi, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil {
-				return nil, fmt.Errorf("invalid range %q: %w", seg, err)
-			}
-			if lo > hi {
-				return nil, fmt.Errorf("invalid range %q: start > end", seg)
-			}
-			for i := lo; i <= hi; i++ {
-				nums = append(nums, i)
-			}
-		} else {
-			n, err := strconv.Atoi(seg)
-			if err != nil {
-				return nil, fmt.Errorf("invalid line number %q: %w", seg, err)
-			}
-			nums = append(nums, n)
+		// A trailing comma is accepted, as --highlight accepts it.
+		if seg == "" {
+			continue
+		}
+		lo, hi, err := parseLineRange(seg)
+		if err == nil {
+			hi, err = clampRange(seg, lo, hi, maxLine)
+		}
+		if err != nil {
+			return nil, err
+		}
+		for i := lo; i <= hi; i++ {
+			nums = append(nums, i)
 		}
 	}
+	return BuildLineSpec(nums), nil
+}
 
-	// Deduplicate and sort
-	seen := map[int]bool{}
-	var deduped []int
-	for _, n := range nums {
-		if !seen[n] {
-			seen[n] = true
-			deduped = append(deduped, n)
+// parseLineRange reads one "N" or "N-M" segment. The messages name the
+// segment and the shape expected rather than echoing strconv: "parsing \"2:\":
+// invalid syntax" does not tell anyone that columns belong in --highlight.
+func parseLineRange(seg string) (lo, hi int, err error) {
+	bad := func(why string) (int, int, error) {
+		return 0, 0, fmt.Errorf("invalid segment %q: %s", seg, why)
+	}
+	if strings.Contains(seg, ":") {
+		return bad("expected N or N-M (columns go in --highlight/--hr/--hs)")
+	}
+	a, b, isRange := strings.Cut(seg, "-")
+	lo, err = strconv.Atoi(strings.TrimSpace(a))
+	if err != nil {
+		return bad("expected N or N-M")
+	}
+	hi = lo
+	if isRange {
+		if hi, err = strconv.Atoi(strings.TrimSpace(b)); err != nil {
+			return bad("expected N or N-M")
 		}
 	}
-	sort.Ints(deduped)
+	switch {
+	case lo < 1:
+		return bad("line numbers start at 1")
+	case lo > hi:
+		return bad("start > end")
+	}
+	return lo, hi, nil
+}
 
-	// Insert gap sentinels between non-adjacent lines
-	var result []int
-	for i, n := range deduped {
-		if i > 0 && n > deduped[i-1]+1 {
-			result = append(result, GapSentinel)
-		}
-		result = append(result, n)
+// clampRange cuts hi to maxLine (0 = unknown), never below lo, and refuses a
+// range that is still too wide to expand. The width is judged after the
+// clamp: "1-99999999" is a fine way to say "to the end" when the length is
+// known, and only a range that really has to be expanded line by line is
+// refused.
+func clampRange(seg string, lo, hi, maxLine int) (int, error) {
+	if maxLine > 0 && hi > maxLine {
+		hi = max(maxLine, lo)
 	}
-	return result, nil
+	if hi-lo >= MaxRangeLines {
+		return 0, fmt.Errorf("invalid segment %q: spans more than %d lines", seg, MaxRangeLines)
+	}
+	return hi, nil
 }
 
 // BuildLineSpec takes an arbitrary slice of line numbers (may contain duplicates
@@ -74,15 +112,14 @@ func BuildLineSpec(nums []int) []int {
 	if len(nums) == 0 {
 		return nil
 	}
-	seen := make(map[int]bool, len(nums))
 	var deduped []int
 	for _, n := range nums {
-		if n > 0 && !seen[n] {
-			seen[n] = true
+		if n > 0 {
 			deduped = append(deduped, n)
 		}
 	}
-	sort.Ints(deduped)
+	slices.Sort(deduped)
+	deduped = slices.Compact(deduped)
 
 	var result []int
 	for i, n := range deduped {
@@ -129,18 +166,44 @@ func (m Marks) Lines() []int {
 // known after tokenizing — a caller that resolved the spec up front could not
 // center on a literal found with --mark.
 func ContextSpec(m Marks, context int) []int {
+	return ContextSpecMax(m, context, 0)
+}
+
+// ContextSpecMax is ContextSpec for a source whose last line is maxLine
+// (0 = unknown). Each window is clamped to the file before it is expanded, so
+// a "--context 10000000" typo costs a few lines instead of a gigabyte. A mark
+// past the end whose window holds no real line keeps its own number: the spec
+// must not come back empty (that means "every line"), and the out-of-view
+// warning still has a line to name.
+func ContextSpecMax(m Marks, context, maxLine int) []int {
 	if context <= 0 || len(m) == 0 {
 		return nil
 	}
+	if maxLine <= 0 {
+		// Unknown length: a window wider than this already makes a view far
+		// past the image height limit, so the cap changes nothing drawn.
+		context = min(context, MaxRangeLines)
+	}
 	var nums []int
+	next := 1 // first line no earlier window has emitted
 	for _, line := range m.Lines() {
-		start := line - context
-		if start < 1 {
-			start = 1
+		start := max(line-context, next)
+		end := line + context
+		if maxLine > 0 && end > maxLine {
+			end = maxLine
 		}
-		for i := start; i <= line+context; i++ {
+		if start > end {
+			if line > end {
+				nums = append(nums, line)
+			}
+			continue
+		}
+		// Marks are sorted, so windows only overlap their predecessor:
+		// starting after it keeps the work linear in the lines emitted.
+		for i := start; i <= end; i++ {
 			nums = append(nums, i)
 		}
+		next = end + 1
 	}
 	return BuildLineSpec(nums)
 }
@@ -155,6 +218,15 @@ func ContextSpec(m Marks, context int) []int {
 //
 // Returns nil for the empty string (nothing highlighted).
 func ParseHighlightSpec(s string) (Marks, error) {
+	return ParseHighlightSpecMax(s, 0)
+}
+
+// ParseHighlightSpecMax is ParseHighlightSpec for a source whose last line is
+// maxLine (0 = unknown). A whole-line range is clamped before it becomes one
+// map entry per line. The part that ran past the end is kept as a single entry
+// for line maxLine+1, so the "marked line is not in the output" warning still
+// fires: clamping must not turn a mark the analyst asked for into silence.
+func ParseHighlightSpecMax(s string, maxLine int) (Marks, error) {
 	if s == "" {
 		return nil, nil
 	}
@@ -168,28 +240,36 @@ func ParseHighlightSpec(s string) (Marks, error) {
 
 		lineSpec, colSpec, hasCols := strings.Cut(seg, ":")
 		if !hasCols {
-			nums, err := ParseLineSpec(lineSpec)
+			lo, hi, err := parseLineRange(seg)
 			if err != nil {
 				return nil, err
 			}
-			for _, n := range nums {
-				if n == GapSentinel {
-					continue
-				}
-				if n < 1 {
-					return nil, fmt.Errorf("invalid line in %q: line numbers start at 1", seg)
-				}
+			end, err := clampRange(seg, lo, hi, maxLine)
+			if err != nil {
+				return nil, err
+			}
+			if end < hi {
+				// The clamped-off part, as one line past the end.
+				past := max(maxLine+1, lo)
+				marks[past] = append(marks[past], Span{})
+				end = min(end, maxLine)
+			}
+			for n := lo; n <= end; n++ {
 				marks[n] = append(marks[n], Span{})
 			}
 			continue
 		}
 
-		line, err := strconv.Atoi(strings.TrimSpace(lineSpec))
+		lineSpec = strings.TrimSpace(lineSpec)
+		line, err := strconv.Atoi(lineSpec)
 		if err != nil {
-			return nil, fmt.Errorf("invalid line in %q: %w", seg, err)
+			if strings.Contains(lineSpec, "-") {
+				return nil, fmt.Errorf("invalid segment %q: a column range needs a single line (N:C-D)", seg)
+			}
+			return nil, fmt.Errorf("invalid segment %q: expected N:C or N:C-D", seg)
 		}
 		if line < 1 {
-			return nil, fmt.Errorf("invalid line in %q: line numbers start at 1", seg)
+			return nil, fmt.Errorf("invalid segment %q: line numbers start at 1", seg)
 		}
 		span, err := parseSpan(seg, colSpec)
 		if err != nil {
@@ -209,20 +289,20 @@ func parseSpan(seg, colSpec string) (Span, error) {
 	lo, hi, isRange := strings.Cut(strings.TrimSpace(colSpec), "-")
 	start, err := strconv.Atoi(strings.TrimSpace(lo))
 	if err != nil {
-		return Span{}, fmt.Errorf("invalid column in %q: %w", seg, err)
+		return Span{}, fmt.Errorf("invalid segment %q: expected N:C or N:C-D", seg)
 	}
 	end := start
 	if isRange {
 		end, err = strconv.Atoi(strings.TrimSpace(hi))
 		if err != nil {
-			return Span{}, fmt.Errorf("invalid column range in %q: %w", seg, err)
+			return Span{}, fmt.Errorf("invalid segment %q: expected N:C or N:C-D", seg)
 		}
 	}
 	if start < 1 {
-		return Span{}, fmt.Errorf("invalid column in %q: columns start at 1", seg)
+		return Span{}, fmt.Errorf("invalid segment %q: columns start at 1", seg)
 	}
 	if end < start {
-		return Span{}, fmt.Errorf("invalid column range in %q: start > end", seg)
+		return Span{}, fmt.Errorf("invalid segment %q: column start > end", seg)
 	}
 	return Span{Start: start, End: end}, nil
 }
