@@ -17,10 +17,8 @@ type UIColors struct {
 	TabBorder color.NRGBA
 	TabAccent color.NRGBA
 	TabText   color.NRGBA
-	// ControlActive is the plate Burp fills behind an active toolbar toggle.
-	ControlActive color.NRGBA
-	LineNumFg     color.NRGBA
-	GutterSep     color.NRGBA
+	LineNumFg color.NRGBA
+	GutterSep color.NRGBA
 	// Splitter and SplitterShade are the two hairline columns Burp draws between
 	// the Request and Response panes: a light edge with a darker one behind it.
 	// They are hairlines, not a filled band, and they run the full height of the
@@ -189,7 +187,6 @@ var Themes = map[string]*Theme{
 			TabBorder:       rgb(0x52, 0x52, 0x55),
 			TabAccent:       rgb(0xcc, 0x68, 0x3d),
 			TabText:         rgb(0xff, 0xff, 0xff),
-			ControlActive:   rgb(0x37, 0x63, 0x99),
 			LineNumFg:       rgb(0xa0, 0xa0, 0xa0),
 			GutterSep:       rgb(0x55, 0x55, 0x55),
 			Splitter:        rgb(0x52, 0x52, 0x55),

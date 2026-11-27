@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/tachote/taker/highlight"
-	"golang.org/x/image/font"
 )
 
 const (
@@ -26,10 +25,6 @@ const (
 	burpTabLabelPad     = 6
 	burpTabUnderlinePad = 31
 	burpTabPitch        = 64
-	burpIconGap         = 32
-	burpIconPlateW      = 38
-	burpIconPlateH      = 36
-	burpIconPlateR      = 6
 )
 
 // HTTPConfig holds parameters for HTTP request/response evidence rendering.
@@ -525,11 +520,7 @@ func RenderHTTP(cfg *HTTPConfig) (*image.NRGBA, error) {
 		redacted = req.Redacted + res.Redacted
 		// No window chrome here: a Burp screenshot is a flush pane, and evidence
 		// that looks like it came straight out of Burp reads as more credible.
-		// Pad the request pane before composing: the response pane is the long
-		// one, and a mark that lands at the end of a request line would
-		// otherwise touch the splitter.
-		reqImg = padRight(reqImg, httpDividerMargin, theme.UI.Bg)
-		pane = composeHTTP(reqImg, resImg, theme.UI)
+		pane = composeHTTP(reqImg, resImg, httpDividerMargin, theme.UI)
 	} else {
 		// One side only: the splitter would frame a pane whose other half does
 		// not exist. Render the message that is evidence.
@@ -585,52 +576,55 @@ func renderPair(a, b *Config) (*image.NRGBA, *image.NRGBA, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("render %s: %w", b.Title, err)
 	}
-
 	h := max(imgA.Bounds().Dy(), imgB.Bounds().Dy())
-	if imgA.Bounds().Dy() < h {
-		a.MinHeight, a.noWarn = h, true
-		if imgA, err = Render(a); err != nil {
-			return nil, nil, fmt.Errorf("render %s: %w", a.Title, err)
-		}
-	}
-	if imgB.Bounds().Dy() < h {
-		b.MinHeight, b.noWarn = h, true
-		if imgB, err = Render(b); err != nil {
-			return nil, nil, fmt.Errorf("render %s: %w", b.Title, err)
-		}
-	}
-	return imgA, imgB, nil
+	return extendDown(imgA, h), extendDown(imgB, h), nil
 }
 
-// padRight widens an image by n columns of bg on the right, so a pane can be
-// given breathing room before it is composed against its neighbour.
-func padRight(src *image.NRGBA, n int, bg color.NRGBA) *image.NRGBA {
-	if n <= 0 {
+// extendDown grows a rendered HTTP panel to height h by repeating its last
+// row. That row is bottom padding — background plus the gutter rule, nothing
+// else — so the result is the same image Render draws with MinHeight set,
+// without laying out, wrapping and drawing every line a second time.
+func extendDown(src *image.NRGBA, h int) *image.NRGBA {
+	b := src.Bounds()
+	if b.Dy() >= h {
 		return src
 	}
-	b := src.Bounds()
-	out := image.NewNRGBA(image.Rect(0, 0, b.Dx()+n, b.Dy()))
-	fillRect(out, out.Bounds(), bg)
-	draw.Draw(out, image.Rect(0, 0, b.Dx(), b.Dy()), src, b.Min, draw.Src)
+	out := image.NewNRGBA(image.Rect(0, 0, b.Dx(), h))
+	copy(out.Pix, src.Pix[src.PixOffset(b.Min.X, b.Min.Y):])
+	last := out.Pix[(b.Dy()-1)*out.Stride : b.Dy()*out.Stride]
+	for y := b.Dy(); y < h; y++ {
+		copy(out.Pix[y*out.Stride:], last)
+	}
 	return out
 }
 
-// composeHTTP places two equal-height panels side by side with a divider.
-func composeHTTP(left, right *image.NRGBA, ui UIColors) *image.NRGBA {
+// composeHTTP places two equal-height panels side by side with a divider. gap
+// columns of background separate the left panel from the splitter: the
+// response pane is the long one, and a mark that lands at the end of a request
+// line would otherwise touch the splitter.
+func composeHTTP(left, right *image.NRGBA, gap int, ui UIColors) *image.NRGBA {
 	lw, rw := left.Bounds().Dx(), right.Bounds().Dx()
 	h := max(left.Bounds().Dy(), right.Bounds().Dy())
+	gap = max(gap, 0)
+	split := lw + gap
 
-	out := image.NewNRGBA(image.Rect(0, 0, lw+httpDividerW+rw, h))
-	fillRect(out, out.Bounds(), ui.Bg)
-
+	out := image.NewNRGBA(image.Rect(0, 0, split+httpDividerW+rw, h))
 	draw.Draw(out, image.Rect(0, 0, lw, h), left, left.Bounds().Min, draw.Src)
+	if gap > 0 {
+		// The gap continues the left panel: its header band, then the editor
+		// background below it.
+		headerH := min(burpTitleH+burpTabRowH, h)
+		fillRect(out, image.Rect(lw, 0, split, h), ui.Bg)
+		fillRect(out, image.Rect(lw, 0, split, headerH-burpTabBorderH), ui.TabBarBg)
+		fillRect(out, image.Rect(lw, headerH-burpTabBorderH, split, headerH), ui.TabBorder)
+	}
 	// Burp's splitter is two hairlines — a light edge and a darker one behind
 	// it — not a filled band, and it runs the full height of the window.
-	fillRect(out, image.Rect(lw, 0, lw+1, h), ui.Splitter)
+	fillRect(out, image.Rect(split, 0, split+1, h), ui.Splitter)
 	if httpDividerW > 1 {
-		fillRect(out, image.Rect(lw+1, 0, lw+httpDividerW, h), ui.SplitterShade)
+		fillRect(out, image.Rect(split+1, 0, split+httpDividerW, h), ui.SplitterShade)
 	}
-	draw.Draw(out, image.Rect(lw+httpDividerW, 0, lw+httpDividerW+rw, h), right, right.Bounds().Min, draw.Src)
+	draw.Draw(out, image.Rect(split+httpDividerW, 0, split+httpDividerW+rw, h), right, right.Bounds().Min, draw.Src)
 
 	// Hairline around the pane, like Burp's split container.
 	drawRectOutline(out, out.Bounds(), ui.TabBorder, 1)
@@ -707,71 +701,4 @@ func drawHTTPPanelHeader(img *image.NRGBA, l *layout, cfg *Config, ui UIColors) 
 
 	// The band's closing border, below the underline.
 	fillRect(img, image.Rect(0, tabBottom, l.totalWidth, tabBottom+burpTabBorderH), ui.TabBorder)
-
-	// Burp's right-hand controls, right-aligned: hide-headers, pretty-print
-	// (lit when active), show-non-printing, and the editor menu.
-	ix := l.totalWidth - burpTitleX - burpControlsWidth(l.metrics)
-	iconBaseline := tabTop + (burpTabRowH-burpTabBorderH+l.iconAscent)/2 - 2
-	for _, c := range burpControls {
-		if c.text != "" {
-			// The \n toggle shares the icons' optical centre — it is one of
-			// the controls, not a tab label, so it does not sit high like one.
-			drawString(img, l.uiFace, c.text, ix, iconBaseline+l.uiAscent-l.iconAscent, ui.LineNumFg)
-			ix += textWidth(l.uiFace, c.text) + burpIconGap
-			continue
-		}
-		fg := ui.LineNumFg
-		if c.active {
-			// Burp marks the active toggle with a filled blue plate under a white
-			// glyph, not by brightening the glyph. The plate is still muted: in
-			// evidence the only loud thing should be the highlight box marking
-			// the finding.
-			cy := iconBaseline - l.iconAscent/2
-			plate := image.Rect(ix-burpIconPlateW/2+1, cy-burpIconPlateH/2,
-				ix+burpIconPlateW/2+1, cy+burpIconPlateH/2)
-			fillRect(img, plate, ui.ControlActive)
-			roundCorners(img, plate, burpIconPlateR, ui.TabBarBg, ui.ControlActive)
-			fg = rgb(0xff, 0xff, 0xff)
-		}
-		drawString(img, l.iconFace, string(c.glyph), ix, iconBaseline, fg)
-		ix += burpGlyphW(l.iconFace, c.glyph) + burpIconGap
-	}
-}
-
-// burpGlyphW is a control glyph's own advance. iconW is the file-icon slot —
-// the wordmark glyphs it now measures are wider than a toolbar glyph, and
-// spacing the strip on it left every icon adrift.
-func burpGlyphW(face font.Face, glyph rune) int {
-	adv, ok := face.GlyphAdvance(glyph)
-	if !ok {
-		return burpIconPlateW
-	}
-	return int(adv >> 6)
-}
-
-// burpControl is one item in the editor's right-hand control strip. Burp mixes
-// glyphs with a literal "\n" label, so an item is either a glyph or text.
-type burpControl struct {
-	glyph  rune
-	text   string
-	active bool
-}
-
-var burpControls = []burpControl{
-	{glyph: '\ue668'},               // hide headers (eye with slash)
-	{glyph: '\uf039', active: true}, // pretty-print, shown as the active toggle
-	{text: `\n`},                    // show non-printing characters
-	{glyph: '\uf0c9'},               // editor menu
-}
-
-func burpControlsWidth(m *metrics) int {
-	w := 0
-	for _, c := range burpControls {
-		if c.text != "" {
-			w += textWidth(m.uiFace, c.text) + burpIconGap
-			continue
-		}
-		w += max(burpGlyphW(m.iconFace, c.glyph), burpIconPlateW) + burpIconGap
-	}
-	return w
 }

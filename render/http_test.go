@@ -1,6 +1,7 @@
 package render
 
 import (
+	"bytes"
 	"fmt"
 	"image/color"
 	"reflect"
@@ -59,7 +60,7 @@ func TestRenderPairEqualisesHeight(t *testing.T) {
 		t.Fatalf("panel heights differ: %d vs %d", a.Bounds().Dy(), b.Bounds().Dy())
 	}
 
-	out := composeHTTP(a, b, BurpTheme.UI)
+	out := composeHTTP(a, b, 0, BurpTheme.UI)
 	wantW := a.Bounds().Dx() + httpDividerW + b.Bounds().Dx()
 	if out.Bounds().Dx() != wantW {
 		t.Errorf("composed width %d, want %d", out.Bounds().Dx(), wantW)
@@ -615,5 +616,32 @@ func TestHTTPRedact(t *testing.T) {
 	}
 	if facts.Redacted == 0 {
 		t.Error("no redaction box drawn for a literal in the capture")
+	}
+}
+
+// extendDown stands in for a second Render with MinHeight. It is only correct
+// while the two produce the same pixels, so pin that.
+func TestExtendDownMatchesMinHeight(t *testing.T) {
+	cfg := func() *Config {
+		return &Config{
+			Lines: tokenizeFor(t, "GET / HTTP/1.1\nHost: a\n"), Title: "Request",
+			Theme: BurpTheme, Wrap: true, WrapWidth: 80, HTTPMode: true,
+			HighlightLines: highlight.Marks{2: nil},
+		}
+	}
+	base, err := Render(cfg())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := base.Bounds().Dy() + 137
+	want := cfg()
+	want.MinHeight = h
+	wantImg, err := Render(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := extendDown(base, h)
+	if !got.Bounds().Eq(wantImg.Bounds()) || !bytes.Equal(got.Pix, wantImg.Pix) {
+		t.Fatal("extendDown differs from Render with MinHeight")
 	}
 }

@@ -23,7 +23,11 @@ func sha256Hex(b []byte) string {
 // and input hashes produced it.
 func pngWithMeta(img image.Image, meta [][2]string) ([]byte, error) {
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, img); err != nil {
+	// BestSpeed skips the per-row adaptive filter search and the slow deflate
+	// levels. Evidence is mostly flat panel colour, so the file grows ~4% while
+	// encoding — the largest cost of a run once rendering is fast — drops ~30%.
+	enc := png.Encoder{CompressionLevel: png.BestSpeed}
+	if err := enc.Encode(&buf, img); err != nil {
 		return nil, err
 	}
 	raw := buf.Bytes()

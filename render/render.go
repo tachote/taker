@@ -34,14 +34,17 @@ const (
 
 	// Burp's panels are denser than an editor's. Its gutter reserves two digit
 	// cells and leaves the line numbers 18px in from the pane edge, with a
-	// hairline rule after them. The header is tall: a title band over a tab row
-	// of the same colour, closed by a 2px border — the height is what makes the
-	// panel read as a Repeater pane rather than a code block. The row height is
+	// hairline rule after them. The header is a title band over a tab row of
+	// the same colour, closed by a 2px border — that shape is what makes the
+	// panel read as a Repeater pane rather than a code block. Burp's band is
+	// taller (109px) because it also carries the editor's toolbar; without the
+	// toolbar that height is dead space above the title, so it is trimmed to
+	// what the title needs. The row height is
 	// the face's own line box with no added leading, as in Burp's editor: the
 	// multiplier stays under 1 to mean exactly that, because a row taller than
 	// its font is what made the panel look airy next to a real capture.
 	burpLineHeightMul = 0.98
-	burpTitleH        = 109
+	burpTitleH        = 84
 	burpTabRowH       = 46
 	burpTabUnderlineH = 6
 	burpTabBorderH    = 2
@@ -50,11 +53,11 @@ const (
 	burpGutterPadR    = 12
 	burpCodeGutterGap = 10
 	burpTitleX        = 12
-	burpControlsGap   = 40
 	gapRowHeight      = 30
 	highlightBorderW  = 2
 	highlightPadR     = 12 // keeps the box border off the window edge
 	markPadX          = 3  // breathing room around a column mark
+	wholeLineInsetL   = 4  // keeps a whole-line box's border off the pane edge
 	maxImageWidth     = 2400
 	// Browsers stop decoding past 32767px, so anything taller is not evidence
 	// anyone can open. Warn well before that: past a few thousand pixels the
@@ -283,9 +286,9 @@ func loadMetrics() (*metrics, error) {
 	uiM := uiFace.Metrics()
 
 	return &metrics{
-		face:        face,
-		uiFace:      uiFace,
-		iconFace:    iconFace,
+		face:        newCachedFace(face),
+		uiFace:      newCachedFace(uiFace),
+		iconFace:    newCachedFace(iconFace),
 		charWidth:   int(adv >> 6),
 		ascent:      ascent,
 		descent:     descent,
@@ -452,8 +455,7 @@ func headerWidth(m *metrics, cfg *Config) int {
 		for _, t := range cfg.httpTabs {
 			tab += textWidth(m.uiFace, t.label) + burpTabPitch
 		}
-		// Keep the tabs and the control strip from touching on a narrow panel.
-		return tab + burpControlsGap + burpControlsWidth(m) + burpTitleX
+		return tab + burpTitleX
 	}
 	return tabPad + m.iconW + tabIconGap + textWidth(m.face, cfg.Title) +
 		tabCloseGap + textWidth(m.iconFace, string(gClose)) + tabPad
@@ -732,11 +734,11 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 		return nil
 	}
 	if len(spans) == 0 {
-		// Marked, but no region named. Start the band at the pane's left edge
-		// so its wash sits behind the line number too: the number is the
+		// Marked, but no region named. Start the band just inside the pane's
+		// left edge so its wash sits behind the line number too: the number is the
 		// reader's anchor and must not be swallowed by a half-covered band,
 		// and the band reads as a full row the way Burp's line selection does.
-		return []markBox{{x1: 0, x2: l.highlightR, wholeLine: true}}
+		return []markBox{{x1: wholeLineInsetL, x2: l.highlightR, wholeLine: true}}
 	}
 
 	rowStart, rowEnd := 1, 0 // 1-based columns covered by this visual row
@@ -748,10 +750,10 @@ func (l *layout) markBoxes(marks highlight.Marks, line int, vl visualLine, wrapC
 	var boxes []markBox
 	for _, sp := range spans {
 		if sp.WholeLine() {
-			// Full-bleed band, like an editor's current-line highlight. It starts
-			// at 0 so the gutter and its number are inside the wash rather than
-			// half-covered by it.
-			boxes = append(boxes, markBox{x1: 0, x2: l.highlightR, wholeLine: true})
+			// Full-width band, like an editor's current-line highlight. It starts
+			// just inside the pane edge so the gutter and its number are inside
+			// the wash, while its border stays clear of the pane's own outline.
+			boxes = append(boxes, markBox{x1: wholeLineInsetL, x2: l.highlightR, wholeLine: true})
 			continue
 		}
 		start, end := sp.Start, sp.End
@@ -990,14 +992,71 @@ func rowWidth(face font.Face, toks []highlight.Token) int {
 	return w
 }
 
+// drawString draws s like font.Drawer does — kerning, then each glyph at the
+// pen — but composites the glyph masks itself. image/draw has no fast path for
+// an NRGBA destination, and its generic per-pixel interface calls made text
+// drawing the second-largest cost of a render.
 func drawString(img *image.NRGBA, face font.Face, s string, x, baseline int, c color.NRGBA) {
-	d := font.Drawer{
-		Dst:  img,
-		Src:  image.NewUniform(c),
-		Face: face,
-		Dot:  fixed.P(x, baseline),
+	dot := fixed.P(x, baseline)
+	prev := rune(-1)
+	for _, r := range s {
+		if prev >= 0 {
+			dot.X += face.Kern(prev, r)
+		}
+		dr, mask, mp, adv, _ := face.Glyph(dot, r)
+		if !dr.Empty() {
+			if a, ok := mask.(*image.Alpha); ok {
+				blendMask(img, dr, a, mp, c)
+			} else {
+				draw.DrawMask(img, dr, image.NewUniform(c), image.Point{}, mask, mp, draw.Over)
+			}
+		}
+		dot.X += adv
+		prev = r
 	}
-	d.DrawString(s)
+}
+
+// blendMask composites colour c through an alpha mask onto img with Porter-Duff
+// "over", the operation font.Drawer requests. dr is the destination rectangle
+// and mp the mask point aligned with dr.Min.
+func blendMask(img *image.NRGBA, dr image.Rectangle, mask *image.Alpha, mp image.Point, c color.NRGBA) {
+	clipped := dr.Intersect(img.Rect)
+	if clipped.Empty() {
+		return
+	}
+	mp = mp.Add(clipped.Min.Sub(dr.Min))
+	const m = 0xffff
+	sr, sg, sb := uint64(c.R)*0x101, uint64(c.G)*0x101, uint64(c.B)*0x101
+	ca := uint64(c.A)
+	for y := clipped.Min.Y; y < clipped.Max.Y; y++ {
+		di := img.PixOffset(clipped.Min.X, y)
+		mi := mask.PixOffset(mp.X, mp.Y+y-clipped.Min.Y)
+		for x := clipped.Min.X; x < clipped.Max.X; x, di, mi = x+1, di+4, mi+1 {
+			ma := uint64(mask.Pix[mi])
+			if ma == 0 {
+				continue
+			}
+			a := ma * ca * 0x101 / 0xff // source coverage, 16-bit
+			d := img.Pix[di : di+4 : di+4]
+			if a == m {
+				d[0], d[1], d[2], d[3] = c.R, c.G, c.B, 0xff
+				continue
+			}
+			da := uint64(d[3]) * 0x101
+			// Premultiplied over, then back to straight alpha for NRGBA.
+			outA := a + da*(m-a)/m
+			if outA == 0 {
+				continue
+			}
+			dr := uint64(d[0]) * 0x101 * da / m
+			dg := uint64(d[1]) * 0x101 * da / m
+			db := uint64(d[2]) * 0x101 * da / m
+			d[0] = uint8(((sr*a + dr*(m-a)) / m * m / outA) >> 8)
+			d[1] = uint8(((sg*a + dg*(m-a)) / m * m / outA) >> 8)
+			d[2] = uint8(((sb*a + db*(m-a)) / m * m / outA) >> 8)
+			d[3] = uint8(outA >> 8)
+		}
+	}
 }
 
 // drawStringBold thickens a string by re-drawing it one pixel to the right.
@@ -1009,8 +1068,26 @@ func drawStringBold(img *image.NRGBA, face font.Face, s string, x, baseline int,
 	drawString(img, face, s, x+1, baseline, c)
 }
 
+// fillRect paints r with c (draw.Src semantics). It writes the pixel bytes
+// directly: draw.Draw has no fast path for a uniform source on an NRGBA
+// destination and went pixel by pixel through interfaces, which was most of the
+// time spent rendering a long capture.
 func fillRect(img *image.NRGBA, r image.Rectangle, c color.NRGBA) {
-	draw.Draw(img, r, image.NewUniform(c), image.Point{}, draw.Src)
+	r = r.Intersect(img.Rect)
+	if r.Empty() {
+		return
+	}
+	w := r.Dx() * 4
+	i0 := img.PixOffset(r.Min.X, r.Min.Y)
+	row := img.Pix[i0 : i0+w : i0+w]
+	row[0], row[1], row[2], row[3] = c.R, c.G, c.B, c.A
+	for n := 4; n < w; n *= 2 {
+		copy(row[n:], row[:n])
+	}
+	for y := r.Min.Y + 1; y < r.Max.Y; y++ {
+		i := img.PixOffset(r.Min.X, y)
+		copy(img.Pix[i:i+w], row)
+	}
 }
 
 func drawRectOutline(img *image.NRGBA, r image.Rectangle, c color.NRGBA, thickness int) {
