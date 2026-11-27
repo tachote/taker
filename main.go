@@ -21,13 +21,11 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 	"unicode/utf8"
 
 	"github.com/alecthomas/kong"
 	"github.com/tachote/taker/highlight"
 	"github.com/tachote/taker/render"
-	"golang.org/x/text/unicode/norm"
 )
 
 // SnapCmd renders a single code file.
@@ -436,6 +434,9 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	if code != 0 {
 		return code
 	}
+	if code := normalizeNeedles(rep, &cmd.Redact, &cmd.Mark, cmd.RedactRe); code != 0 {
+		return code
+	}
 	for _, c := range [][2]any{
 		{"--context", cmd.Context}, {"--wrap-width", cmd.WrapWidth},
 		{"--first-line", cmd.FirstLine}, {"--max-marks", cmd.MaxMarks},
@@ -509,7 +510,7 @@ func runSnap(cmd *SnapCmd, rep *reporter) int {
 	// Every source gets the same treatment, piped bytes included: a needle
 	// spliced by an ANSI escape would otherwise stay legible while "matched
 	// nothing" warned, and the hash would cover bytes the image does not show.
-	src = normalizeInput(src, rep)
+	src = normalizeInput(src, rep, runGuard(rep, codeTabWidth, cmd.Redact, cmd.Mark, redactRe, cmd.MarkRe, cmd.RedactKeep))
 	// http and term refuse an empty input; a blank editor pane at exit 0 is
 	// the same silent success the "no lines matched" guard exists to stop.
 	// Checked after normalizing: a file of only BOMs or ANSI codes draws
@@ -709,6 +710,10 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 	if code != 0 {
 		return code
 	}
+	if code := normalizeNeedles(rep, &cmd.Redact, &cmd.Mark, cmd.RedactRe); code != 0 {
+		return code
+	}
+	guard := runGuard(rep, codeTabWidth, cmd.Redact, cmd.Mark, redactRe, cmd.MarkRe, cmd.RedactKeep)
 	for _, c := range [][2]any{
 		{"--context", cmd.Context}, {"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks},
 	} {
@@ -740,7 +745,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		rawReq, rawRes := splitCapture(raw)
 		warnHTTPHeadUTF8(rep, "request", rawReq)
 		warnHTTPHeadUTF8(rep, "response", rawRes)
-		raw = normalizeInput(raw, rep)
+		raw = normalizeInput(raw, rep, guard)
 		reqSrc, resSrc = splitCapture(raw)
 		srcPath = cmd.File
 		// A "Save item" that is not HTTP at all renders as a confident
@@ -761,7 +766,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		if cmd.Request != "" {
 			if reqSrc, err = os.ReadFile(cmd.Request); err == nil {
 				warnHTTPHeadUTF8(rep, "request", reqSrc)
-				reqSrc = normalizeInput(reqSrc, rep)
+				reqSrc = normalizeInput(reqSrc, rep, guard)
 			} else {
 				return rep.fail(exitInput, kindInput, "read request: %v", err)
 			}
@@ -769,7 +774,7 @@ func runHTTP(cmd *HTTPCmd, rep *reporter) int {
 		if cmd.Response != "" {
 			if resSrc, err = os.ReadFile(cmd.Response); err == nil {
 				warnHTTPHeadUTF8(rep, "response", resSrc)
-				resSrc = normalizeInput(resSrc, rep)
+				resSrc = normalizeInput(resSrc, rep, guard)
 			} else {
 				return rep.fail(exitInput, kindInput, "read response: %v", err)
 			}
@@ -1140,12 +1145,12 @@ var ansiRe = regexp.MustCompile("\x1b\\[[0-9;:?!]*[ -/]*[@-~]|\x1b\\][^\a\x1b]*(
 // and zero-width codepoints — mid-line BOM, combining marks — count as a
 // column in match offsets but advance zero in the glyph run, which shifts the
 // redaction box off its text and lets the needle bleed out of the box.
-func normalizeInput(b []byte, rep *reporter) []byte {
+func normalizeInput(b []byte, rep *reporter, g needleGuard) []byte {
 	stripped, n := stripANSI(b)
 	if n > 0 {
 		rep.warn("stripped %d ANSI escape sequences before matching", n)
 	}
-	out, m := normalizeZeroWidth(stripped)
+	out, m := normalizeZeroWidth(stripped, g)
 	if m > 0 {
 		rep.warn("removed %d invisible/format characters (BOM, ZWSP, combining marks with no precomposed form) so the needle stays contiguous", m)
 	}
@@ -1179,39 +1184,6 @@ func warnHTTPHeadUTF8(rep *reporter, side string, raw []byte) {
 		head = head[:i]
 	}
 	warnInvalidUTF8(rep, "the "+side+"'s start line or headers", head, 0)
-}
-
-// normalizeZeroWidth DELETES codepoints that carry no standalone glyph —
-// format chars (Cf: BOM, ZWSP, ZWJ, bidi controls), combining marks (Mn/Me)
-// and soft hyphen. Replacing them would still leave a rune the needle does
-// not contain; deleting them makes the spliced needle contiguous again, and
-// because matcher and renderer share the normalized text, columns stay
-// aligned and the box lands on the needle.
-//
-// The text is composed to NFC first. A decomposed accent ("Jose" + U+0301)
-// is a combining mark too, and deleting it rendered "José" as "Jose" — a
-// changed name in the evidence. Composed, it is one rune and one cell, so
-// only the marks with no precomposed form are left to delete.
-func normalizeZeroWidth(b []byte) ([]byte, int) {
-	composed := b
-	if !norm.NFC.IsNormal(b) {
-		composed = norm.NFC.Bytes(b)
-	}
-	var sb strings.Builder
-	sb.Grow(len(composed))
-	n := 0
-	for _, r := range string(composed) {
-		if r == '\uFEFF' || r == '\u00AD' || unicode.Is(unicode.Cf, r) ||
-			unicode.Is(unicode.Mn, r) || unicode.Is(unicode.Me, r) {
-			n++
-			continue
-		}
-		sb.WriteRune(r)
-	}
-	if n == 0 {
-		return composed, 0
-	}
-	return []byte(sb.String()), n
 }
 
 func stripANSI(b []byte) ([]byte, int) {
@@ -1256,6 +1228,49 @@ func argvNeedleValues(args []string) []string {
 		}
 	}
 	return out
+}
+
+// codeTabWidth is the tab stop of a snap or http panel (highlight.Tokenize).
+const codeTabWidth = 4
+
+// normalizeNeedles puts the --redact and --mark literals through the
+// input's normalization (see normalizeNeedle) and registers both forms as
+// secrets: the typed one still sits in the recorded argv. A literal of only
+// invisible characters normalizes to nothing and could never match — for a
+// --redact that is a clean-looking image with the secret in it.
+func normalizeNeedles(rep *reporter, redact, mark *[]string, patterns []string) int {
+	typed := slices.Clone(*redact)
+	for _, f := range []struct {
+		flag string
+		list *[]string
+	}{{"--redact", redact}, {"--mark", mark}} {
+		for i, v := range *f.list {
+			n := normalizeNeedle(v)
+			if n == "" {
+				return rep.fail(exitUsage, kindUsage,
+					"%s #%d holds only characters the image does not draw (format characters, combining marks, ANSI escapes)", f.flag, i+1)
+			}
+			(*f.list)[i] = n
+		}
+	}
+	lits := typed
+	for i, n := range *redact {
+		if n != typed[i] && !slices.Contains(lits, n) {
+			lits = append(lits, n)
+		}
+	}
+	if len(lits) > len(typed) {
+		rep.setSecretsAll(slices.Concat(lits, patterns), lits)
+	}
+	return 0
+}
+
+// runGuard is the needle set normalizeZeroWidth must not move a match out
+// of. A --mark-re that does not compile is left out here; the run reports it
+// where it compiles the pattern.
+func runGuard(rep *reporter, tabWidth int, redact, mark []string, redactRe []*regexp.Regexp, markRe []string, keep int) needleGuard {
+	mres, _ := compileRegex("--mark-re", markRe)
+	return newNeedleGuard(tabWidth, slices.Concat(redact, mark), redactRe, mres, rep.redactFragRes(keep))
 }
 
 // argvRedactRe collects the --redact-re values off the raw argv, for the
@@ -1807,6 +1822,9 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	if code != 0 {
 		return code
 	}
+	if code := normalizeNeedles(rep, &cmd.Redact, &cmd.Mark, cmd.RedactRe); code != 0 {
+		return code
+	}
 	for _, c := range [][2]any{
 		{"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks},
 	} {
@@ -1962,7 +1980,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 	// one — `Sup3r\x1b[31mD4ta!` — would stay legible while "matched nothing"
 	// warned. Strip before matching, and declare the transform.
 	stripped, nANSI := stripANSI([]byte(transcript))
-	stripped, nZW := normalizeZeroWidth(stripped)
+	stripped, nZW := normalizeZeroWidth(stripped, runGuard(rep, terminalTabWidth, cmd.Redact, cmd.Mark, redactRe, cmd.MarkRe, cmd.RedactKeep))
 	if nZW > 0 {
 		rep.warn("removed %d invisible/format characters so the needle stays contiguous", nZW)
 	}
@@ -2020,6 +2038,9 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	if code != 0 {
 		return code
 	}
+	if code := normalizeNeedles(rep, &cmd.Redact, &cmd.Mark, cmd.RedactRe); code != 0 {
+		return code
+	}
 	for _, c := range [][2]any{
 		{"--wrap-width", cmd.WrapWidth}, {"--max-marks", cmd.MaxMarks},
 	} {
@@ -2051,7 +2072,7 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 	// Same contract as exec: escape codes render nothing on a real terminal,
 	// so they must not hide a needle from the matcher either.
 	stripped, nANSI := stripANSI(src)
-	stripped, nZW := normalizeZeroWidth(stripped)
+	stripped, nZW := normalizeZeroWidth(stripped, runGuard(rep, terminalTabWidth, cmd.Redact, cmd.Mark, redactRe, cmd.MarkRe, cmd.RedactKeep))
 	if nZW > 0 {
 		rep.warn("removed %d invisible/format characters so the needle stays contiguous", nZW)
 	}

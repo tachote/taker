@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -161,11 +162,93 @@ func TestNormalizeZeroWidthComposesAccents(t *testing.T) {
 		{"q\u0307", "q", 1},                  // no precomposed q-dot-above
 		{"to\u200bken\ufeff", "token", 2},    // zero-width splices still go
 		{"Jose\u0301\u200b", "Jos\u00e9", 1}, // composed, then the ZWSP removed
+		// Canonical singletons are the input's own codepoints: NFC over the
+		// whole text turned a KELVIN SIGN into an ASCII K and a GREEK
+		// QUESTION MARK into ';', erasing a homoglyph finding.
+		{"user = \"admin\u212a\"", "user = \"admin\u212a\"", 0},
+		{"x\u037e y\u2126 \uf900", "x\u037e y\u2126 \uf900", 0},
+		{"\u212a\u0301", "\u212a", 1}, // a base NFC would replace is not composed
+		{"\xff\u200b", "\xff", 1},     // invalid bytes stay as they were
 	} {
-		got, n := normalizeZeroWidth([]byte(tc.in))
+		got, n := normalizeZeroWidth([]byte(tc.in), needleGuard{})
 		if string(got) != tc.want || n != tc.removed {
 			t.Errorf("normalizeZeroWidth(%q) = %q, %d; want %q, %d", tc.in, got, n, tc.want, tc.removed)
 		}
+	}
+}
+
+// Composing must not move a needle off its text. "s3cr3tpasse" + U+0301
+// composes to "...pass\u00e9", where the needle no longer matched, though it
+// did when the mark was deleted: the secret was drawn in clear. The sequences
+// a match covers stay uncomposed; the rest of the line keeps its accents.
+func TestNormalizeZeroWidthKeepsNeedlesCovered(t *testing.T) {
+	for _, tc := range []struct {
+		label    string
+		g        needleGuard
+		in, want string
+	}{
+		{"literal", newNeedleGuard(4, []string{"s3cr3tpasse"}),
+			"k = \"s3cr3tpasse\u0301\" # Jose\u0301", "k = \"s3cr3tpasse\" # Jos\u00e9"},
+		{"pattern", newNeedleGuard(4, nil, []*regexp.Regexp{regexp.MustCompile(`s3cr3t[a-z]+`)}),
+			"s3cr3tpasse\u0301 Jose\u0301", "s3cr3tpasse Jos\u00e9"},
+		// \B looks one rune past the match: the neighbour stays too.
+		{"neighbour", newNeedleGuard(4, nil, []*regexp.Regexp{regexp.MustCompile(`tok\B`)}),
+			"toke\u0301 Jose\u0301", "toke Jos\u00e9"},
+		// A needle written composed matches only the composed form.
+		{"composed needle", newNeedleGuard(4, []string{"pass\u00e9"}),
+			"passe\u0301", "pass\u00e9"},
+		{"tab before", newNeedleGuard(4, []string{"a   s3cr3tpasse"}),
+			"a\ts3cr3tpasse\u0301", "a\ts3cr3tpasse"},
+	} {
+		got, _ := normalizeZeroWidth([]byte(tc.in), tc.g)
+		if string(got) != tc.want {
+			t.Errorf("%s: normalizeZeroWidth(%q) = %q, want %q", tc.label, tc.in, got, tc.want)
+		}
+	}
+}
+
+// End to end, against the base binary's behaviour: a KELVIN SIGN keeps its
+// no-glyph warning, a --redact holding it matches, and a needle followed by a
+// composable mark is still hidden.
+func TestSnapKeepsSingletonsAndHidesNeedles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	kel := write("kel.py", "user = \"admin\u212a\"\n")
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: kel, Output: filepath.Join(dir, "k.png"), JSON: true}), r)
+	})
+	if code != exitOK || !hasWarning(rep, "no glyph") {
+		t.Errorf("kelvin: exit %d, warnings %q; want the no-glyph warning", code, rep.Warnings)
+	}
+	for _, tc := range []struct {
+		label, body, needle string
+	}{
+		{"kelvin needle", "user = \"admin\u212a\"\n", "admin\u212a"},
+		{"mark after the needle", "k = \"s3cr3tpasse\u0301\"\n", "s3cr3tpasse"},
+		{"needle with the mark", "k = \"s3cr3tpasse\u0301\"\n", "s3cr3tpasse\u0301"},
+		{"needle with a ZWSP", "k = \"s3cr3tpasse\"\n", "s3cr3t\u200bpasse"},
+	} {
+		f := write("in.py", tc.body)
+		code, rep, _ := runJSON(t, func(r *reporter) int {
+			return runSnap(snapCmd(SnapCmd{File: f, Output: filepath.Join(dir, "r.png"), JSON: true, Redact: []string{tc.needle}}), r)
+		})
+		if code != exitOK || rep.Redactions != 1 || hasWarning(rep, "matched nothing") {
+			t.Errorf("%s: exit %d, redactions %d, warnings %q; want the value hidden", tc.label, code, rep.Redactions, rep.Warnings)
+		}
+	}
+	// A needle of only invisible characters could never match.
+	f := write("z.py", "x = 1\n")
+	code, _, _ = runJSON(t, func(r *reporter) int {
+		return runSnap(snapCmd(SnapCmd{File: f, Output: filepath.Join(dir, "z.png"), JSON: true, Redact: []string{"\u200b\u200b\u200b"}}), r)
+	})
+	if code != exitUsage {
+		t.Errorf("invisible needle: exit %d, want %d", code, exitUsage)
 	}
 }
 

@@ -591,9 +591,12 @@ the raw bytes. A hash of the raw bytes would let anyone who holds the image
 confirm guesses at a short secret it hides. To check a sum, apply the same two
 steps:
 
-1. **Normalize.** Strip ANSI escape sequences, compose the text to Unicode
-   NFC, then remove the BOM, zero-width and other invisible format characters,
-   and combining marks that have no precomposed form.
+1. **Normalize.** Strip ANSI escape sequences, compose each letter that is
+   followed by combining marks (NFC on that sequence only, never on a letter
+   NFC would replace, such as U+212A KELVIN SIGN), then remove the BOM,
+   zero-width and other invisible format characters, and the combining marks
+   left over. On a line where composing would move a `--redact` or `--mark`
+   match off its text, the sequences under that match are not composed.
 2. **Mask.** Replace with `<redacted>`, longest match first and left to right:
    every `--redact` literal, its double-quoted form (`"value"`, quotes
    included), each of its parts between `-:=,/.;` and spaces that is 3 bytes or
@@ -648,7 +651,7 @@ Guards against shipping a screenshot that proves nothing:
 - **A mark that falls outside the view** → warning naming the lines, because an image with one box while the note says two lines are highlighted is worse than an unmarked one. `-H 2,4 -n 1-3` says `marked line 4 is not in the "auth.py" output`; when nothing is in view the older, blunter message fires instead.
 - **Skipped lines** → the gap band states the count (`··· 37 lines skipped`), so a reader can tell how much was left out.
 - **Overlapping highlights** → one box. `-H 1:10-16 -m sk_live` on the same value draws the union, not nested frames that read as two findings. The `marks` counts do not change.
-- **Invisible characters** → before matching, taker strips ANSI escapes, composes the text to NFC (so a decomposed `José` keeps its accent) and removes the BOM, zero-width and other format characters that would split a needle, in files, stdin, HTTP messages and transcripts alike. Each step that changed something is warned (`stripped 2 ANSI escape sequences before matching`, `removed 1 invisible/format characters ...`), and the `sha256` covers the normalized text.
+- **Invisible characters** → before matching, taker strips ANSI escapes, composes each letter that carries combining marks (so a decomposed `José` keeps its accent; other codepoints, such as a KELVIN SIGN homoglyph, are drawn as they are) and removes the BOM, zero-width and other format characters that would split a needle, in files, stdin, HTTP messages and transcripts alike. `--redact` and `--mark` literals get the same treatment, so a needle holding one of those characters still matches; a literal made only of them is refused (exit 2). Each step that changed something is warned (`stripped 2 ANSI escape sequences before matching`, `removed 1 invisible/format characters ...`), and the `sha256` covers the normalized text.
 - **Bytes that are not UTF-8** → drawn as U+FFFD and warned with their count and first line, because the image cannot show their values.
 - **An `-o` that names the input** → refused (exit 2), including a symlink to it or another spelling of its path, instead of overwriting the evidence's own source.
 
