@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/chroma/v2"
 	"github.com/tachote/taker/highlight"
 )
 
@@ -786,3 +787,41 @@ func TestShadowRunsUnderTheRoundedCorners(t *testing.T) {
 }
 
 func lum(c color.NRGBA) float64 { return (float64(c.R) + float64(c.G) + float64(c.B)) / (3 * 255) }
+
+// Plain identifiers and whole terminal transcripts take the style's Text
+// colour; a style that does not set one falls back to a dark-theme grey in
+// the highlighter. On a light background that grey is near-invisible, so
+// every code theme must set a Text colour that reads on its own background.
+func TestThemesSetReadableTextColour(t *testing.T) {
+	for name, th := range Themes {
+		if th.HTTPOnly {
+			continue
+		}
+		e := th.Chroma.Get(chroma.Text)
+		if !e.Colour.IsSet() {
+			t.Errorf("%s: the chroma style sets no Text colour", name)
+			continue
+		}
+		fg := rgb(e.Colour.Red(), e.Colour.Green(), e.Colour.Blue())
+		if c := contrast(fg, th.UI.Bg); c < 4.5 {
+			t.Errorf("%s: Text %v on Bg %v has contrast %.2f, want >= 4.5", name, fg, th.UI.Bg, c)
+		}
+	}
+}
+
+// The same property end to end: a transcript rendered on github-light must
+// put dark ink on the page, not pale grey.
+func TestGitHubLightTranscriptIsReadable(t *testing.T) {
+	th := Themes["github-light"]
+	lines, err := highlight.Tokenize("$ id\nuid=1000(user)\n", "text", "", th.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lt := range lines {
+		for _, tok := range lt.Tokens {
+			if c := contrast(rgb(tok.R, tok.G, tok.B), th.UI.Bg); c < 4.5 {
+				t.Errorf("token %q colour #%02x%02x%02x has contrast %.2f on white", tok.Text, tok.R, tok.G, tok.B, c)
+			}
+		}
+	}
+}
