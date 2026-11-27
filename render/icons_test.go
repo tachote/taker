@@ -6,13 +6,19 @@ import (
 	"image/color"
 	"image/png"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
 	customfont "github.com/tachote/taker/font"
 	"github.com/tachote/taker/highlight"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/opentype"
 	"golang.org/x/image/font/sfnt"
+	"golang.org/x/image/math/fixed"
 )
 
 // Every codepoint in the icon tables must exist in the embedded font. A missing
@@ -47,6 +53,106 @@ func TestIconGlyphsExist(t *testing.T) {
 		check("iconByName", name, ic)
 	}
 	check("defaultIcon", "-", defaultIcon)
+
+	// The icon face draws more than the tables: the tab's close × and the
+	// glyph that sizes the icon cell. The embedded font is a subset, so every
+	// Nerd Font codepoint written anywhere in the renderer has to be in it —
+	// a subset that missed the × dropped it from every snap, and the table
+	// checks above still passed.
+	for _, r := range append([]rune{gClose, iconAdvanceProbe}, sourceIconRunes(t)...) {
+		check("icon face", fmt.Sprintf("%U", r), fileIcon{glyph: r, color: rgb(1, 1, 1)})
+	}
+}
+
+// sourceIconRunes collects every Private Use Area escape in the renderer's
+// non-test sources: the codepoints font/subset.sh keeps. Escapes are the only
+// way a Nerd Font codepoint is written here (see fileIcon), so a new icon
+// cannot reach the image without passing through this list.
+func sourceIconRunes(t *testing.T) []rune {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	esc := regexp.MustCompile(`\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})`)
+	seen := map[rune]bool{}
+	var out []rune
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range esc.FindAllStringSubmatch(string(src), -1) {
+			v, _ := strconv.ParseUint(m[1]+m[2], 16, 32)
+			r := rune(v)
+			pua := (r >= 0xe000 && r <= 0xf8ff) || r >= 0xf0000
+			if pua && !seen[r] {
+				seen[r] = true
+				out = append(out, r)
+			}
+		}
+	}
+	if len(out) < 50 {
+		t.Fatalf("found only %d icon escapes; the source scan is broken", len(out))
+	}
+	return out
+}
+
+// The embedded Nerd Font is a subset of the release font. Pointed at the full
+// font, this proves the subset draws every codepoint the renderer uses with
+// the same mask, offset and advance, and keeps the face metrics the layout
+// reads. font/subset.sh runs it after every subset; without the variable it
+// is skipped, since the full font is not shipped.
+func TestIconSubsetMatchesFullFont(t *testing.T) {
+	path := os.Getenv("TAKER_FULL_NERD_FONT")
+	if path == "" {
+		t.Skip("set TAKER_FULL_NERD_FONT to the full SymbolsNerdFontMono-Regular.ttf")
+	}
+	full, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	face := func(ttf []byte) font.Face {
+		f, err := opentype.Parse(ttf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fc, err := opentype.NewFace(f, &opentype.FaceOptions{Size: iconSizePt, DPI: fontDPI, Hinting: font.HintingFull})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fc
+	}
+	want, got := face(full), face(customfont.SymbolsTTF)
+	if want.Metrics() != got.Metrics() {
+		t.Errorf("face metrics differ: full %+v, subset %+v", want.Metrics(), got.Metrics())
+	}
+	runes := append([]rune{gClose, iconAdvanceProbe}, sourceIconRunes(t)...)
+	for _, r := range runes {
+		// Every sub-pixel phase the glyph cache can key on, in steps of 1/8px.
+		for fx := fixed.Int26_6(0); fx < 64; fx += 8 {
+			dot := fixed.Point26_6{X: fx, Y: fixed.I(40)}
+			wdr, wm, wmp, wadv, wok := want.Glyph(dot, r)
+			gdr, gm, gmp, gadv, gok := got.Glyph(dot, r)
+			if wdr != gdr || wadv != gadv || wok != gok {
+				t.Errorf("%U at phase %d: rect/advance %v %v %v, subset %v %v %v", r, fx, wdr, wadv, wok, gdr, gadv, gok)
+				continue
+			}
+			for y := 0; y < wdr.Dy(); y++ {
+				for x := 0; x < wdr.Dx(); x++ {
+					_, _, _, wa := wm.At(wmp.X+x, wmp.Y+y).RGBA()
+					_, _, _, ga := gm.At(gmp.X+x, gmp.Y+y).RGBA()
+					if wa != ga {
+						t.Fatalf("%U at phase %d: mask differs at (%d,%d)", r, fx, x, y)
+					}
+				}
+			}
+		}
+	}
+	t.Logf("%d codepoints identical in the subset (the explicit two repeat in the scan)", len(runes))
 }
 
 func TestIconFor(t *testing.T) {

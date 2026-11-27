@@ -1,12 +1,14 @@
 package render
 
 import (
+	"image/color"
 	"io"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/chroma/v2"
 	"github.com/tachote/taker/highlight"
 )
 
@@ -32,6 +34,18 @@ func TestMergeRuns(t *testing.T) {
 			"adjacent but different columns",
 			[]markRun{{10, 40, 0, 10}, {10, 90, 10, 20}},
 			[]markRun{{10, 40, 0, 10}, {10, 90, 10, 20}},
+		},
+		{
+			// Two marks per row arrive interleaved; each column pair is its own
+			// run, or the rows get doubled borders between them.
+			"two marks per row",
+			[]markRun{{10, 40, 0, 10}, {60, 90, 0, 10}, {10, 40, 10, 20}, {60, 90, 10, 20}},
+			[]markRun{{10, 40, 0, 20}, {60, 90, 0, 20}},
+		},
+		{
+			"interleaved run resumes after a gap",
+			[]markRun{{10, 40, 0, 10}, {60, 90, 0, 10}, {10, 40, 30, 40}},
+			[]markRun{{10, 40, 0, 10}, {60, 90, 0, 10}, {10, 40, 30, 40}},
 		},
 	}
 	for _, c := range cases {
@@ -158,10 +172,65 @@ func TestWrapWords(t *testing.T) {
 	if got := wrapWords(m.face, "", 100); got != nil {
 		t.Errorf("empty text should be nil, got %v", got)
 	}
-	// A word longer than the line still has to come out whole.
-	long := strings.Repeat("x", 40)
-	if got := wrapWords(m.face, long, 5*w); len(got) != 1 || got[0] != long {
-		t.Errorf("an over-long word must not be split: %v", got)
+	// A word wider than the line is broken, not clipped: a URL or a path in a
+	// caption is evidence, and drawing it past the image edge loses its tail.
+	long := strings.Repeat("x", 200)
+	got = wrapWords(m.face, "see "+long+" here", 30*w)
+	for _, line := range got {
+		if textWidth(m.face, line) > 30*w {
+			t.Errorf("line %q exceeds the width", line)
+		}
+	}
+	if joined := strings.Join(got, ""); !strings.Contains(joined, long) {
+		t.Errorf("the long word lost characters: %v", got)
+	}
+	if got[0] != "see" || got[len(got)-1] != "here" && !strings.HasSuffix(got[len(got)-1], " here") {
+		t.Errorf("the words around the long one moved: %v", got)
+	}
+	// Narrower than one character: still one rune per line, never a hang.
+	if got := wrapWords(m.face, "abc", 1); strings.Join(got, "") != "abc" {
+		t.Errorf("sub-character width: %v", got)
+	}
+}
+
+// The footnote carries the revision the code was read from; a path cut at the
+// image edge is a provenance claim nobody can check. Notes break between one
+// another first, so "lines 1-3 of 10" stays one phrase, and a note wider than
+// the strip is broken inside rather than clipped.
+func TestFootnoteKeepsLongSourceRefVisible(t *testing.T) {
+	m, err := loadMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := "services/authentication/internal/handlers/login_handler_v2.py @ 9f344fad66cf"
+	text := joinNotes(ref, "lines 1-3 of 10", "1 region redacted")
+	const sw = 600
+	lines, w, _ := footnoteStrip.layout(m, text, sw)
+	if w != sw {
+		t.Errorf("the footnote widened the image to %d", w)
+	}
+	for _, line := range lines {
+		if lw := stripTextX + textWidth(m.face, line) + captionMinPad; lw > sw {
+			t.Errorf("line %q is %dpx, past the %dpx image", line, lw, sw)
+		}
+	}
+	all := strings.Join(lines, "")
+	if !strings.Contains(all, "login_handler_v2.py") {
+		t.Errorf("the file name was lost: %q", lines)
+	}
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "lines 1-3 of 10") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the crop note was split across lines: %q", lines)
+	}
+
+	// A footnote that fits is one line, unchanged.
+	if lines, _, _ := footnoteStrip.layout(m, joinNotes("a.py @ 1234", "lines 1-3 of 10"), 2000); len(lines) != 1 || lines[0] != "a.py @ 1234 \u00b7 lines 1-3 of 10" {
+		t.Errorf("a fitting footnote changed: %q", lines)
 	}
 }
 
@@ -722,4 +791,176 @@ func TestTerminalDropsTheGutter(t *testing.T) {
 		t.Errorf("terminal width %d >= code width %d; the gutter was not dropped",
 			term.Bounds().Dx(), code.Bounds().Dx())
 	}
+}
+
+// A snap draws its footnote and caption in place on one canvas, while the HTTP
+// path appends them with withFootnote and withCaption. The two must produce the
+// same pixels, or the same note looks different depending on the command.
+func TestInPlaceStripsMatchTheWrappers(t *testing.T) {
+	lines, err := highlight.Tokenize("a = 1\nb = 2\nc = 3\n", "python", "x.py", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := metricsFor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, caption := range []string{"short", strings.Repeat("a long caption that has to wrap ", 6)} {
+		base := Config{Lines: lines, Title: "x.py", Theme: DefaultTheme, WindowChrome: true, Shadow: true, noWarn: true}
+		bare, err := Render(&base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		const ref = "x.py @ 9f344fad66cf"
+		full := base
+		full.SourceRef, full.Caption = ref, caption
+		got, err := Render(&full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := withCaption(withFootnote(bare, ref, DefaultTheme.UI, m), caption, DefaultTheme.UI, m)
+		if got.Bounds() != want.Bounds() {
+			t.Fatalf("bounds %v, want %v", got.Bounds(), want.Bounds())
+		}
+		if !reflect.DeepEqual(got.Pix, want.Pix) {
+			t.Errorf("caption %.10q: in-place strips differ from the wrapper composition", caption)
+		}
+	}
+}
+
+// With --shadow the window's rounded corners must sit on the shadow, not on
+// the bare canvas: masking them back to the flat ChromeBg left a light notch
+// at each corner, sharpest on the light theme.
+func TestShadowRunsUnderTheRoundedCorners(t *testing.T) {
+	lines, err := highlight.Tokenize("x = 1\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"vscode-dark", "github-light"} {
+		th := Themes[name]
+		img, err := Render(&Config{Lines: lines, Title: "t", Theme: th, Shadow: true, noWarn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The bottom-left corner pixel of the window lies outside the arc.
+		x, y := chromeMargin, img.Bounds().Dy()-chromeMargin-1
+		corner := img.NRGBAAt(x, y)
+		beside := img.NRGBAAt(x-1, y) // the margin just left of it, shadowed
+		if corner == th.UI.ChromeBg {
+			t.Errorf("%s: corner pixel is flat ChromeBg %v: the shadow stops at the corner", name, corner)
+		}
+		if lum(corner) > lum(beside)+0.02 {
+			t.Errorf("%s: corner %v is lighter than the shadow beside it %v", name, corner, beside)
+		}
+	}
+}
+
+func lum(c color.NRGBA) float64 { return (float64(c.R) + float64(c.G) + float64(c.B)) / (3 * 255) }
+
+// Plain identifiers and whole terminal transcripts take the style's Text
+// colour; a style that does not set one falls back to a dark-theme grey in
+// the highlighter. On a light background that grey is near-invisible, so
+// every code theme must set a Text colour that reads on its own background.
+func TestThemesSetReadableTextColour(t *testing.T) {
+	for name, th := range Themes {
+		if th.HTTPOnly {
+			continue
+		}
+		e := th.Chroma.Get(chroma.Text)
+		if !e.Colour.IsSet() {
+			t.Errorf("%s: the chroma style sets no Text colour", name)
+			continue
+		}
+		fg := rgb(e.Colour.Red(), e.Colour.Green(), e.Colour.Blue())
+		if c := contrast(fg, th.UI.Bg); c < 4.5 {
+			t.Errorf("%s: Text %v on Bg %v has contrast %.2f, want >= 4.5", name, fg, th.UI.Bg, c)
+		}
+	}
+}
+
+// The same property end to end: a transcript rendered on github-light must
+// put dark ink on the page, not pale grey.
+func TestGitHubLightTranscriptIsReadable(t *testing.T) {
+	th := Themes["github-light"]
+	lines, err := highlight.Tokenize("$ id\nuid=1000(user)\n", "text", "", th.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, lt := range lines {
+		for _, tok := range lt.Tokens {
+			if c := contrast(rgb(tok.R, tok.G, tok.B), th.UI.Bg); c < 4.5 {
+				t.Errorf("token %q colour #%02x%02x%02x has contrast %.2f on white", tok.Text, tok.R, tok.G, tok.B, c)
+			}
+		}
+	}
+}
+
+// The gap label has to sit inside its band. Drawn with the code face its line
+// box was taller than the band, and the descenders of "skipped" ran through
+// the bottom hairline.
+func TestGapLabelStaysInsideItsBand(t *testing.T) {
+	all, err := highlight.Tokenize("a = 1\nb = 2\nc = 3\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := []highlight.LineTokens{all[0], {IsGap: true, Skipped: 1}, all[2]}
+	img, err := Render(&Config{Lines: lines, Title: "t", Theme: DefaultTheme, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, _ := metricsFor()
+	ui := DefaultTheme.UI
+	top := chromeMargin + tabBarHeight + paddingY + m.lineHeightFor(lineHeightMul)
+	for _, y := range []int{top, top + gapRowHeight - 1} {
+		for x := chromeMargin + chromeRadius; x < img.Bounds().Dx()-chromeMargin-chromeRadius; x++ {
+			if got := img.NRGBAAt(x, y); got != ui.GutterSep {
+				t.Fatalf("hairline at y=%d has %v at x=%d, want GutterSep %v: the label crosses it", y, got, x, ui.GutterSep)
+			}
+		}
+	}
+}
+
+// The footnote and the gap label are the tool's own voice — provenance, crop
+// extent, redaction count, skipped lines — and must read at WCAG AA on every
+// theme. A palette whose dim grey already passes keeps it exactly, so Burp
+// captures do not change colour.
+func TestToolTextIsReadableOnEveryTheme(t *testing.T) {
+	for name, th := range Themes {
+		u := th.UI
+		gap := readable(u.LineNumFg, u.TabText, u.GapBg)
+		foot := readable(u.LineNumFg, u.TabText, u.ChromeBg)
+		if c := contrast(gap, u.GapBg); c < 4.5 {
+			t.Errorf("%s: gap label contrast %.2f, want >= 4.5", name, c)
+		}
+		if c := contrast(foot, u.ChromeBg); c < 4.5 {
+			t.Errorf("%s: footnote contrast %.2f, want >= 4.5", name, c)
+		}
+		if contrast(u.LineNumFg, u.ChromeBg) >= 4.5 && foot != u.LineNumFg {
+			t.Errorf("%s: footnote colour moved although LineNumFg already reads", name)
+		}
+	}
+}
+
+// Rendered, not just computed: the footnote ink on nord must be the readable
+// colour, since nord's own line-number grey sits near 2:1 on its canvas.
+func TestFootnoteUsesReadableInk(t *testing.T) {
+	th := Themes["nord"]
+	lines, err := highlight.Tokenize("a\nb\nc\n", "text", "", th.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := Render(&Config{Lines: lines[:2], Title: "t", Theme: th, TotalLines: 3, noWarn: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := readable(th.UI.LineNumFg, th.UI.TabText, th.UI.ChromeBg)
+	b := img.Bounds()
+	for y := b.Max.Y - 40; y < b.Max.Y; y++ {
+		for x := 0; x < b.Max.X; x++ {
+			if img.NRGBAAt(x, y) == want {
+				return
+			}
+		}
+	}
+	t.Errorf("no footnote pixel has the readable ink %v", want)
 }
