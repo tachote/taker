@@ -10,21 +10,27 @@ Produces VS Code Dark+-styled PNG images with syntax highlighting, line numbers,
 
 ### Download binary (recommended)
 
-Download the latest release for your platform from the [releases page](https://github.com/tachote/taker/releases):
+Download the latest release for your platform from the [releases page](https://github.com/tachote/taker/releases). taker produces audit evidence, so verify the archive against the release's `checksums.txt` before you install it:
 
 ```bash
-# macOS (Apple Silicon)
-curl -L https://github.com/tachote/taker/releases/latest/download/taker_Darwin_arm64.tar.gz | tar xz
-sudo mv taker /usr/local/bin/
+# Pick the archive for your platform:
+#   taker_darwin_arm64.tar.gz   macOS (Apple Silicon)
+#   taker_darwin_amd64.tar.gz   macOS (Intel)
+#   taker_linux_amd64.tar.gz    Linux (x86_64)
+#   taker_linux_arm64.tar.gz    Linux (arm64)
+#   taker_windows_amd64.zip     Windows (x86_64)
+ASSET=taker_darwin_arm64.tar.gz
+BASE=https://github.com/tachote/taker/releases/latest/download
 
-# macOS (Intel)
-curl -L https://github.com/tachote/taker/releases/latest/download/taker_Darwin_x86_64.tar.gz | tar xz
-sudo mv taker /usr/local/bin/
+curl -LO "$BASE/$ASSET"
+curl -LO "$BASE/checksums.txt"
+shasum -a 256 --ignore-missing -c checksums.txt   # Linux: sha256sum --ignore-missing -c checksums.txt
 
-# Linux (amd64)
-curl -L https://github.com/tachote/taker/releases/latest/download/taker_Linux_x86_64.tar.gz | tar xz
+tar xzf "$ASSET" taker
 sudo mv taker /usr/local/bin/
 ```
+
+On Windows, check `taker_windows_amd64.zip` against `checksums.txt` with `Get-FileHash -Algorithm SHA256`, then extract `taker.exe`.
 
 ### go install
 
