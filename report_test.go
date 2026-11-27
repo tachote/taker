@@ -675,3 +675,35 @@ func TestPNGHashSurvivesRedaction(t *testing.T) {
 		})
 	}
 }
+
+// Fragments shorter than three bytes carry almost no secret entropy and match
+// ordinary code: "sk" from sk-ab12cdef9 used to black out ask, task and skip,
+// and the caption came out as ta<redacted> <redacted>ip. Evidence that hides
+// non-secret code is not faithful, so only the documented len >= 3 rule applies.
+func TestShortFragmentsAreNotSecrets(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "app.py")
+	src := "def ask(task):\n    token = \"sk-ab12cdef9\"\n    return os.environ[\"skip\"], task\n"
+	if err := os.WriteFile(file, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var caption string
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		c := runSnap(snapCmd(SnapCmd{
+			File: file, Output: filepath.Join(dir, "a.png"), JSON: true,
+			Redact: []string{"sk-ab12cdef9"}, Label: "task skip",
+		}), r)
+		caption = r.scrub("task skip")
+		return c
+	})
+	if code != exitOK {
+		t.Fatalf("run = %d", code)
+	}
+	// The needle and its one long component "ab12cdef9" — nothing else.
+	if rep.Redactions != 2 {
+		t.Errorf("redactions = %d, want 2 (needle + ab12cdef9)", rep.Redactions)
+	}
+	if caption != "task skip" {
+		t.Errorf("caption scrubbed to %q, want it intact", caption)
+	}
+}

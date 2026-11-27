@@ -231,7 +231,7 @@ func (r *reporter) setSecretsAll(secrets, literals []string) {
 		for _, part := range strings.FieldsFunc(sec, func(r rune) bool {
 			return strings.ContainsRune("-:=,/.; \t", r)
 		}) {
-			if len(part) >= 2 && part != sec {
+			if len(part) >= 3 && part != sec {
 				add(part)
 				frags = append(frags, part)
 			}
