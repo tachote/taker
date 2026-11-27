@@ -2,8 +2,10 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -217,5 +219,52 @@ func TestTranscriptTabsStopEvery8(t *testing.T) {
 		if b.String() != want[i] {
 			t.Errorf("line %d = %q, want %q", i+1, b.String(), want[i])
 		}
+	}
+}
+
+// A transcript has no --context or line range, so the height refusal and the
+// tall-image warning must name what does shorten it — and the report must
+// carry a next command, the way exec's output cap does.
+func TestTerminalHeightHintFitsTheMode(t *testing.T) {
+	var long, mid strings.Builder
+	for i := 1; i <= 2000; i++ {
+		fmt.Fprintf(&long, "line %d\n", i)
+		if i <= 300 {
+			fmt.Fprintf(&mid, "line %d\n", i)
+		}
+	}
+	_, file := writeTranscript(t, long.String())
+	code, rep, _ := runJSON(t, func(r *reporter) int {
+		return runTerm(termCmd(TermCmd{File: file, DryRun: true, JSON: true}), r)
+	})
+	if code != exitRefused || rep.Error == nil {
+		t.Fatalf("term of 2000 lines = %d %+v, want a refusal", code, rep.Error)
+	}
+	if strings.Contains(rep.Error.Message, "--context") || !strings.Contains(rep.Error.Message, "trim the transcript") {
+		t.Errorf("error.message = %q, want the transcript hint and no --context", rep.Error.Message)
+	}
+	if !strings.Contains(strings.Join(rep.Help, "\n"), "head -n 200") {
+		t.Errorf("help = %q, want a head -n 200 recipe", rep.Help)
+	}
+
+	_, file = writeTranscript(t, mid.String())
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runTerm(termCmd(TermCmd{File: file, DryRun: true, JSON: true}), r)
+	})
+	if code != exitOK || !hasWarning(rep, "tall") || hasWarning(rep, "--context") {
+		t.Errorf("term of 300 lines = %d, warnings %q: want a tall warning without --context", code, rep.Warnings)
+	}
+
+	if runtime.GOOS == "windows" {
+		return
+	}
+	code, rep, _ = runJSON(t, func(r *reporter) int {
+		return runExec(execCmd(ExecCmd{Shell: "seq 1 2000", DryRun: true}), r)
+	})
+	if code != exitRefused || rep.Error == nil || strings.Contains(rep.Error.Message, "--context") {
+		t.Fatalf("exec seq 1 2000 = %d %+v, want a refusal without --context", code, rep.Error)
+	}
+	if !strings.Contains(strings.Join(rep.Help, "\n"), "taker exec --sh 'seq 1 2000 | head -n 200'") {
+		t.Errorf("help = %q, want the exec --sh head recipe", rep.Help)
 	}
 }

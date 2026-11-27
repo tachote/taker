@@ -410,7 +410,7 @@ func modeFlags(app *kong.Application, mode string) []string {
 func newParser() *kong.Kong {
 	return kong.Must(&cli,
 		kong.Name("taker"),
-		kong.Description("Generate professional code & HTTP evidence screenshots for security audits."),
+		kong.Description("Generate professional code, HTTP and terminal evidence screenshots for security audits."),
 		// --help still ends the process through this hook; parse errors come
 		// back from Parse so they can be reported like every other failure.
 		kong.Exit(func(code int) { os.Exit(code) }),
@@ -1403,6 +1403,7 @@ type terminalRun struct {
 	redactAsked bool
 	output      string
 	dryRun      bool
+	trimHelp    string // the next command when the transcript is too tall to render
 }
 
 // finishTerminal renders a transcript the way a terminal window looks: no
@@ -1426,6 +1427,9 @@ func finishTerminal(t *terminalRun, rep *reporter) int {
 	}
 	img, err := render.Render(rcfg)
 	if err != nil {
+		if t.trimHelp != "" {
+			rep.helpf("%s", t.trimHelp)
+		}
 		return rep.fail(exitRefused, kindRefused, "render: %v", err)
 	}
 	rep.rep.Redactions = rcfg.Redacted
@@ -1920,6 +1924,7 @@ func runExec(cmd *ExecCmd, rep *reporter) int {
 		redactAsked: len(cmd.Redact)+len(cmd.RedactRe) > 0,
 		output:      cmd.Output,
 		dryRun:      cmd.DryRun,
+		trimHelp:    "taker exec --sh " + quoteWord(provStr+" | head -n 200", true),
 	}, rep)
 }
 
@@ -2005,6 +2010,7 @@ func runTerm(cmd *TermCmd, rep *reporter) int {
 		redactAsked: len(cmd.Redact)+len(cmd.RedactRe) > 0,
 		output:      cmd.Output,
 		dryRun:      cmd.DryRun,
+		trimHelp:    "head -n 200 " + quoteWord(cmd.File, false) + " > short.txt, then taker term short.txt",
 	}, rep)
 }
 
