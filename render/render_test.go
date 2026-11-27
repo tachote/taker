@@ -172,10 +172,65 @@ func TestWrapWords(t *testing.T) {
 	if got := wrapWords(m.face, "", 100); got != nil {
 		t.Errorf("empty text should be nil, got %v", got)
 	}
-	// A word longer than the line still has to come out whole.
-	long := strings.Repeat("x", 40)
-	if got := wrapWords(m.face, long, 5*w); len(got) != 1 || got[0] != long {
-		t.Errorf("an over-long word must not be split: %v", got)
+	// A word wider than the line is broken, not clipped: a URL or a path in a
+	// caption is evidence, and drawing it past the image edge loses its tail.
+	long := strings.Repeat("x", 200)
+	got = wrapWords(m.face, "see "+long+" here", 30*w)
+	for _, line := range got {
+		if textWidth(m.face, line) > 30*w {
+			t.Errorf("line %q exceeds the width", line)
+		}
+	}
+	if joined := strings.Join(got, ""); !strings.Contains(joined, long) {
+		t.Errorf("the long word lost characters: %v", got)
+	}
+	if got[0] != "see" || got[len(got)-1] != "here" && !strings.HasSuffix(got[len(got)-1], " here") {
+		t.Errorf("the words around the long one moved: %v", got)
+	}
+	// Narrower than one character: still one rune per line, never a hang.
+	if got := wrapWords(m.face, "abc", 1); strings.Join(got, "") != "abc" {
+		t.Errorf("sub-character width: %v", got)
+	}
+}
+
+// The footnote carries the revision the code was read from; a path cut at the
+// image edge is a provenance claim nobody can check. Notes break between one
+// another first, so "lines 1-3 of 10" stays one phrase, and a note wider than
+// the strip is broken inside rather than clipped.
+func TestFootnoteKeepsLongSourceRefVisible(t *testing.T) {
+	m, err := loadMetrics()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := "services/authentication/internal/handlers/login_handler_v2.py @ 9f344fad66cf"
+	text := joinNotes(ref, "lines 1-3 of 10", "1 region redacted")
+	const sw = 600
+	lines, w, _ := footnoteStrip.layout(m, text, sw)
+	if w != sw {
+		t.Errorf("the footnote widened the image to %d", w)
+	}
+	for _, line := range lines {
+		if lw := stripTextX + textWidth(m.face, line) + captionMinPad; lw > sw {
+			t.Errorf("line %q is %dpx, past the %dpx image", line, lw, sw)
+		}
+	}
+	all := strings.Join(lines, "")
+	if !strings.Contains(all, "login_handler_v2.py") {
+		t.Errorf("the file name was lost: %q", lines)
+	}
+	found := false
+	for _, line := range lines {
+		if strings.Contains(line, "lines 1-3 of 10") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the crop note was split across lines: %q", lines)
+	}
+
+	// A footnote that fits is one line, unchanged.
+	if lines, _, _ := footnoteStrip.layout(m, joinNotes("a.py @ 1234", "lines 1-3 of 10"), 2000); len(lines) != 1 || lines[0] != "a.py @ 1234 \u00b7 lines 1-3 of 10" {
+		t.Errorf("a fitting footnote changed: %q", lines)
 	}
 }
 

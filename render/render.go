@@ -7,6 +7,7 @@ import (
 	"image/draw"
 	"math"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1359,11 +1360,14 @@ func plural(n int, one, many string) string {
 type stripSpec struct {
 	gap, padY int
 	lineMul   float64
+	// notes wraps between joinNotes' notes before it wraps inside one, so
+	// "lines 1-3 of 10" is never split while the strip has room for it.
+	notes bool
 }
 
 var (
-	footnoteStrip = stripSpec{footnoteGap, footnotePadY, footnoteLineMul}
-	captionStrip  = stripSpec{captionGap, captionPadY, captionLineMul}
+	footnoteStrip = stripSpec{footnoteGap, footnotePadY, footnoteLineMul, true}
+	captionStrip  = stripSpec{captionGap, captionPadY, captionLineMul, false}
 )
 
 // stripTextX is where strip text starts: aligned with the caption's text
@@ -1379,7 +1383,11 @@ func (s stripSpec) layout(m *metrics, text string, sw int) ([]string, int, int) 
 	if text == "" {
 		return nil, sw, 0
 	}
-	lines := wrapWords(m.face, text, sw-stripTextX-captionMinPad)
+	wrap := wrapWords
+	if s.notes {
+		wrap = wrapNotes
+	}
+	lines := wrap(m.face, text, sw-stripTextX-captionMinPad)
 	if len(lines) == 0 {
 		return nil, sw, 0 // whitespace only: no strip, no empty band
 	}
@@ -1488,7 +1496,45 @@ func joinNotes(notes ...string) string {
 			kept = append(kept, n)
 		}
 	}
-	return strings.Join(kept, "  \u00b7  ")
+	return strings.Join(kept, noteSep)
+}
+
+// noteSep separates the notes in a footnote. wrapNotes splits on it to wrap
+// between notes, so it is never written any other way.
+const noteSep = "  \u00b7  "
+
+// wrapNotes lays out a joinNotes string: whole notes per line where they fit,
+// and wrapWords inside a note only when that note alone is wider than the
+// line. Words are spaced as wrapWords spaces them, so a footnote that fits
+// comes out exactly as one wrapWords line.
+func wrapNotes(face font.Face, text string, maxWidth int) []string {
+	const sep = " \u00b7 "
+	var lines []string
+	current := ""
+	for _, note := range strings.Split(text, noteSep) {
+		note = strings.Join(strings.Fields(note), " ")
+		switch {
+		case note == "":
+			continue
+		case current == "":
+			current = note
+		case maxWidth <= 0 || textWidth(face, current+sep+note) <= maxWidth:
+			current += sep + note
+			continue
+		default:
+			lines = append(lines, current)
+			current = note
+		}
+		if maxWidth > 0 && textWidth(face, current) > maxWidth {
+			parts := wrapWords(face, current, maxWidth)
+			lines = append(lines, parts[:len(parts)-1]...)
+			current = parts[len(parts)-1]
+		}
+	}
+	if current != "" {
+		lines = append(lines, current)
+	}
+	return lines
 }
 
 // withCaption appends a strip stating what the image proves. Evidence that
@@ -1530,8 +1576,12 @@ func (m *metrics) lineHeightFor(mul float64) int {
 	return int(float64(m.ascent+m.descent) * mul)
 }
 
-// wrapWords breaks prose at spaces to fit maxWidth. Unlike the code wrapper it
-// never splits mid-word: a caption is read, not inspected character by character.
+// wrapWords breaks prose at spaces to fit maxWidth: a caption is read, not
+// inspected character by character, so words stay whole where they can. A
+// word wider than the line on its own — a URL, a path — is broken into
+// pieces that fit, starting on a line of its own: drawn whole it ran past the
+// image edge and was cropped, and the cropped tail is usually what identifies
+// the evidence.
 func wrapWords(face font.Face, text string, maxWidth int) []string {
 	words := strings.Fields(text)
 	if len(words) == 0 {
@@ -1542,14 +1592,39 @@ func wrapWords(face font.Face, text string, maxWidth int) []string {
 	}
 
 	var lines []string
-	current := words[0]
-	for _, w := range words[1:] {
-		if textWidth(face, current+" "+w) <= maxWidth {
+	current := ""
+	for _, w := range words {
+		if current != "" && textWidth(face, current+" "+w) <= maxWidth {
 			current += " " + w
 			continue
 		}
-		lines = append(lines, current)
+		if current != "" {
+			lines = append(lines, current)
+		}
 		current = w
+		if textWidth(face, w) > maxWidth {
+			pieces := breakWord(face, w, maxWidth)
+			lines = append(lines, pieces[:len(pieces)-1]...)
+			current = pieces[len(pieces)-1]
+		}
 	}
 	return append(lines, current)
+}
+
+// breakWord cuts w into runs of runes no wider than maxWidth, at least one
+// rune each so a width under one character cannot loop forever.
+func breakWord(face font.Face, w string, maxWidth int) []string {
+	var pieces []string
+	r := []rune(w)
+	for len(r) > 0 {
+		// Width grows with every rune, so the longest piece that fits is a
+		// binary search, not a measure per rune of a growing prefix.
+		n := sort.Search(len(r), func(i int) bool {
+			return textWidth(face, string(r[:i+1])) > maxWidth
+		})
+		n = max(n, 1)
+		pieces = append(pieces, string(r[:n]))
+		r = r[n:]
+	}
+	return pieces
 }
