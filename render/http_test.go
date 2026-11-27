@@ -826,3 +826,29 @@ func TestContextOverrideWarningIsExact(t *testing.T) {
 		t.Errorf("warnings = %v, want only the --nr override", warned)
 	}
 }
+
+// Without a Content-Type the form guess is all there is, so it has to refuse
+// lines that merely contain one '=': markup, script, prose and json. A form
+// field's name is URL-encoded, so it never holds a raw space or markup.
+func TestLooksFormEncoded(t *testing.T) {
+	for line, want := range map[string]bool{
+		"uid=admin&passw=x":             true,
+		"a=1":                           true,
+		"a=&b=":                         true,
+		"q=hello world&x=%3Cy%3E":       true,
+		`<a href="/admin">Admin</a>`:    false,
+		"var isAdmin = true;":           false,
+		"total = 5 items":               false,
+		`{"next":"/x?a=1"}`:             false,
+		"=orphan":                       false,
+		"a=1&":                          false,
+		"":                              false,
+		`<input name="q" value="1">`:    false,
+		"title=<b>x</b>&mode=preview":   true,
+		"just some prose with no equal": false,
+	} {
+		if got := looksFormEncoded(line); got != want {
+			t.Errorf("looksFormEncoded(%q) = %v, want %v", line, got, want)
+		}
+	}
+}

@@ -441,14 +441,18 @@ func formFieldTokens(text string) []highlight.Token {
 	return toks
 }
 
-// looksFormEncoded reports k=v&k=v. Every field has to carry an '=', so a line
-// of prose with one '=' in it, or a JSON object, is not treated as a form.
+// looksFormEncoded reports k=v&k=v. Every field has to carry an '=' after a
+// name that could be URL-encoded: never empty, and without the raw spaces,
+// quotes, angle brackets or braces that a form encoder would have escaped.
+// Requiring the '=' alone let any line with one in it through — prose
+// ("total = 5"), markup (<a href="/x">), script, a JSON object.
 func looksFormEncoded(s string) bool {
 	if s == "" {
 		return false
 	}
 	for _, field := range strings.Split(s, "&") {
-		if !strings.Contains(field, "=") {
+		name, _, found := strings.Cut(field, "=")
+		if !found || name == "" || strings.ContainsAny(name, " \t<>\"{}") {
 			return false
 		}
 	}
