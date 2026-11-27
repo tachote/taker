@@ -1,6 +1,7 @@
 package render
 
 import (
+	"image/color"
 	"io"
 	"os"
 	"reflect"
@@ -756,3 +757,32 @@ func TestInPlaceStripsMatchTheWrappers(t *testing.T) {
 		}
 	}
 }
+
+// With --shadow the window's rounded corners must sit on the shadow, not on
+// the bare canvas: masking them back to the flat ChromeBg left a light notch
+// at each corner, sharpest on the light theme.
+func TestShadowRunsUnderTheRoundedCorners(t *testing.T) {
+	lines, err := highlight.Tokenize("x = 1\n", "text", "", DefaultTheme.Chroma)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"vscode-dark", "github-light"} {
+		th := Themes[name]
+		img, err := Render(&Config{Lines: lines, Title: "t", Theme: th, Shadow: true, noWarn: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The bottom-left corner pixel of the window lies outside the arc.
+		x, y := chromeMargin, img.Bounds().Dy()-chromeMargin-1
+		corner := img.NRGBAAt(x, y)
+		beside := img.NRGBAAt(x-1, y) // the margin just left of it, shadowed
+		if corner == th.UI.ChromeBg {
+			t.Errorf("%s: corner pixel is flat ChromeBg %v: the shadow stops at the corner", name, corner)
+		}
+		if lum(corner) > lum(beside)+0.02 {
+			t.Errorf("%s: corner %v is lighter than the shadow beside it %v", name, corner, beside)
+		}
+	}
+}
+
+func lum(c color.NRGBA) float64 { return (float64(c.R) + float64(c.G) + float64(c.B)) / (3 * 255) }

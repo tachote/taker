@@ -762,10 +762,17 @@ func (c *snapCanvas) finish(cfg *Config, ui UIColors, m *metrics) *image.NRGBA {
 		drawWindowBar(view(c.out, image.Rect(c.win.Min.X, c.win.Min.Y, c.win.Max.X, c.win.Min.Y+windowBarH)),
 			cfg.Title, ui, m)
 	}
+	// The corners are masked back to whatever lies under the window there. With
+	// a shadow that is the shadow, not the flat canvas: masking to ChromeBg cut
+	// a light notch into the shadow at every rounded corner.
+	bg := func(x, y int) color.NRGBA { return ui.ChromeBg }
 	if cfg.Shadow {
 		drawShadow(c.out, c.win)
+		bg = func(x, y int) color.NRGBA {
+			return mix(ui.ChromeBg, rgb(0, 0, 0), shadowAlphaAt(c.win, x, y))
+		}
 	}
-	roundCorners(c.out, c.win, chromeRadius, ui.ChromeBg, ui.TabBorder)
+	roundCorners(c.out, c.win, chromeRadius, bg, ui.TabBorder)
 	drawFootnote(c.out, c.footTop, c.footnote, ui, m)
 	drawCaption(c.out, c.capTop, c.capH, c.caption, ui, m)
 	return c.out
@@ -951,7 +958,6 @@ func ellipsizeLeft(face font.Face, s string, maxWidth int) string {
 // be laid after the panel is drawn in place.
 func drawShadow(img *image.NRGBA, win image.Rectangle) {
 	shifted := win.Add(image.Pt(0, shadowOffsetY))
-	black := rgb(0, 0, 0)
 	b := img.Bounds()
 	y0 := max(b.Min.Y, shifted.Min.Y-shadowSpread)
 	y1 := min(b.Max.Y, shifted.Max.Y+shadowSpread)
@@ -964,13 +970,21 @@ func drawShadow(img *image.NRGBA, win image.Rectangle) {
 				x = win.Max.X - 1 // jump to the right margin
 				continue
 			}
-			d := max(max(shifted.Min.X-x, x-shifted.Max.X),
-				max(shifted.Min.Y-y, y-shifted.Max.Y))
-			if t := shadowAlpha * float64(shadowSpread-d) / float64(shadowSpread); t > 0 {
-				img.SetNRGBA(x, y, mix(img.NRGBAAt(x, y), black, t))
+			if t := shadowAlphaAt(win, x, y); t > 0 {
+				img.SetNRGBA(x, y, mix(img.NRGBAAt(x, y), rgb(0, 0, 0), t))
 			}
 		}
 	}
+}
+
+// shadowAlphaAt is the shadow's opacity at (x, y) for a window at win, zero
+// outside its reach. roundCorners asks for it too, to rebuild the shadowed
+// background under the corners it masks.
+func shadowAlphaAt(win image.Rectangle, x, y int) float64 {
+	shifted := win.Add(image.Pt(0, shadowOffsetY))
+	d := max(max(shifted.Min.X-x, x-shifted.Max.X),
+		max(shifted.Min.Y-y, y-shifted.Max.Y))
+	return max(0, shadowAlpha*float64(shadowSpread-d)/float64(shadowSpread))
 }
 
 // drawWindowBar dresses the panel as a window: a title band above the tab bar
@@ -1010,8 +1024,10 @@ func drawCircle(img *image.NRGBA, cx, cy, r int, c color.NRGBA) {
 	}
 }
 
-// roundCorners masks the corners of r back to bg and strokes a rounded border.
-func roundCorners(img *image.NRGBA, r image.Rectangle, radius int, bg, border color.NRGBA) {
+// roundCorners masks the corners of r back to the background and strokes a
+// rounded border. bg gives the background at a pixel, since a shadow makes it
+// vary across the corner.
+func roundCorners(img *image.NRGBA, r image.Rectangle, radius int, bg func(x, y int) color.NRGBA, border color.NRGBA) {
 	fillRect(img, image.Rect(r.Min.X+radius, r.Min.Y, r.Max.X-radius, r.Min.Y+chromeBorderW), border)
 	fillRect(img, image.Rect(r.Min.X+radius, r.Max.Y-chromeBorderW, r.Max.X-radius, r.Max.Y), border)
 	fillRect(img, image.Rect(r.Min.X, r.Min.Y+radius, r.Min.X+chromeBorderW, r.Max.Y-radius), border)
@@ -1036,7 +1052,7 @@ func roundCorners(img *image.NRGBA, r image.Rectangle, radius int, bg, border co
 				dist := math.Hypot(float64(x)-c.cx, float64(y)-c.cy)
 				outer := clamp01(float64(radius) - dist + 0.5)
 				ring := outer - clamp01(float64(radius-chromeBorderW)-dist+0.5)
-				px := mix(bg, img.NRGBAAt(x, y), outer)
+				px := mix(bg(x, y), img.NRGBAAt(x, y), outer)
 				img.SetNRGBA(x, y, mix(px, border, ring))
 			}
 		}
